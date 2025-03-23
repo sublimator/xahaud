@@ -620,6 +620,21 @@ run(runner& r)
         (fail((reason), __FILE__, __LINE__), false))
 #endif
 
+
+#ifndef BEAST_EXPECT_EQ
+/** Check equality of two values and report a descriptive error if they're not equal.
+
+    Reports both the expected and actual values in the error message.
+
+    @param actual The actual value being tested
+    @param expected The expected value to compare against
+*/
+#define BEAST_EXPECT_EQ(actual, expected) \
+    BEAST_EXPECTS((actual) == (expected), \
+        std::string("Expected (") + #expected + ") = " + std::to_string(expected) + \
+    " but got (" + #actual + ") = " + std::to_string(actual))
+#endif
+
 } // unit_test
 } // beast
 

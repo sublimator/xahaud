@@ -288,7 +288,7 @@
         *reinterpret_cast<hook::HookContext*>(JS_GetRuntimeOpaque(rt)); \
     [[maybe_unused]] ApplyContext& applyCtx = hookCtx.applyCtx;         \
     [[maybe_unused]] auto& view = applyCtx.view();                      \
-    [[maybe_unused]] auto j = applyCtx.app.journal("View");             \
+    [[maybe_unused]] auto j = applyCtx.app.journal("JSHooks");             \
     try                                                                 \
     {
 #define JS_HOOK_TEARDOWN()                                        \

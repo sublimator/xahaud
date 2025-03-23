@@ -1762,7 +1762,7 @@ DEFINE_JS_FUNCTION(int64_t, trace, JSValue msg, JSValue data, JSValue as_hex)
             JS_FreeCString(ctx, cstr);
             JS_FreeValue(ctx, sdata);
         }
-        else
+        else if (!JS_IsUndefined(data))
         {
             out += "<could not display data>";
         }
@@ -3057,7 +3057,7 @@ DEFINE_JS_FUNCNARG(JSValue, otxn_burden)
 {
     JS_HOOK_SETUP();
 
-    returnJS(__etxn_burden(hookCtx, applyCtx, j));
+    returnJS(__otxn_burden(hookCtx, applyCtx, j));
 
     JS_HOOK_TEARDOWN();
 }
