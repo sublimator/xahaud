@@ -1515,12 +1515,15 @@ public:
             if (hookCtx.result.exitType == hook_api::ExitType::ACCEPT)
             {
                 JLOG(j.warn())
-                    << "HookInfo[" << HC_ACC() << "]: JSVM Exited with ACCEPT";
+                    << "HookInfo[" << HC_ACC() << "]: "
+                << std::string(expr, expr+ expr_len)
+                << " JSVM Exited with ACCEPT";
             }
             else
             {
                 JLOG(j.warn()) << "HookInfo[" << HC_ACC()
-                               << "]: JSVM Exited with ROLLBACK";
+                               << "]: " <<  std::string(expr, expr+ expr_len)
+                << " JSVM Exited with ROLLBACK";
             }
             JLOG(j.warn()) << "HookInfo[" << HC_ACC()
                            << "]: Instruction Count: "

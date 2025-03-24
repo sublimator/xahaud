@@ -81,6 +81,123 @@ public:
         return std::make_unique<CaptureSink>(threshold, strmMutex_, strm_);
     }
 };
+/**
+ * @brief Log manager for FileSinks. This class writes log messages
+ * to a file specified during construction. The file remains open
+ * until the FileLogs object is destroyed.
+ */
+class FileLogs : public Logs
+{
+    std::mutex fileMutex_;
+    std::ofstream fileStream_;
+    std::string filename_;
+    bool flushImmediately_;
+
+    /**
+     * @brief sink for writing all log messages to a file
+     */
+    class FileSink : public beast::Journal::Sink
+    {
+        std::mutex& fileMutex_;
+        std::ofstream& fileStream_;
+        bool flushImmediately_;
+        std::string partition_;
+
+    public:
+        FileSink(
+            beast::severities::Severity threshold,
+            std::mutex& mutex,
+            std::ofstream& fileStream,
+            bool flushImmediately,
+            std::string const& partition)
+            : beast::Journal::Sink(threshold, false)
+            , fileMutex_(mutex)
+            , fileStream_(fileStream)
+            , flushImmediately_(flushImmediately)
+            , partition_(partition)
+        {
+        }
+
+        void
+        write(beast::severities::Severity level, std::string const& text)
+            override
+        {
+            using namespace beast::severities;
+
+            char const* const s = [level]() {
+                switch (level)
+                {
+                    case kTrace:
+                        return "TRC:";
+                    case kDebug:
+                        return "DBG:";
+                    case kInfo:
+                        return "INF:";
+                    case kWarning:
+                        return "WRN:";
+                    case kError:
+                        return "ERR:";
+                    default:
+                        break;
+                    case kFatal:
+                        break;
+                }
+                return "FTL:";
+            }();
+
+            // Only write the string if the level at least equals the threshold.
+            if (level >= threshold())
+            {
+                std::lock_guard lock(fileMutex_);
+                fileStream_ << s << ":" << partition_  << " " << text << std::endl;
+
+                if (flushImmediately_)
+                    fileStream_.flush();
+            }
+        }
+    };
+
+public:
+    explicit FileLogs(
+        std::string const& filename,
+        beast::severities::Severity threshold = beast::severities::kInfo,
+        bool flushImmediately = true)
+        : Logs(threshold)
+        , filename_(filename)
+        , flushImmediately_(flushImmediately)
+    {
+        // Open file in truncation mode (std::ios::trunc) instead of append (std::ios::app)
+        fileStream_.open(filename_, std::ios::out | std::ios::trunc);
+        if (!fileStream_.is_open())
+        {
+            throw std::runtime_error("Failed to open log file: " + filename_);
+        }
+    }
+
+    ~FileLogs() override
+    {
+        if (fileStream_.is_open())
+        {
+            fileStream_.close();
+        }
+    }
+
+    std::unique_ptr<beast::Journal::Sink>
+    makeSink(
+        std::string const& partition,
+        beast::severities::Severity threshold) override
+    {
+        return std::make_unique<FileSink>(
+            threshold, fileMutex_, fileStream_, flushImmediately_, partition);
+    }
+
+    // Get the filename this log is writing to
+    std::string const&
+    filename() const
+    {
+        return filename_;
+    }
+};
 
 }  // namespace test
 }  // namespace ripple
