@@ -31,6 +31,7 @@ LedgerFormats::LedgerFormats()
         {sfLedgerIndex,              soeOPTIONAL},
         {sfLedgerEntryType,          soeREQUIRED},
         {sfFlags,                    soeREQUIRED},
+        {sfRemarks,                  soeOPTIONAL},
     };
 
     add(jss::AccountRoot,
@@ -66,6 +67,7 @@ LedgerFormats::LedgerFormats()
             {sfGovernanceFlags,      soeOPTIONAL},
             {sfGovernanceMarks,      soeOPTIONAL},
             {sfAccountIndex,         soeOPTIONAL},
+            {sfTouchCount,           soeOPTIONAL},
         },
         commonFields);
 
@@ -224,7 +226,8 @@ LedgerFormats::LedgerFormats()
         ltHOOK_DEFINITION,
         {
             {sfHookHash, soeREQUIRED},
-            {sfHookOn, soeREQUIRED},  
+            {sfHookOn, soeREQUIRED},
+            {sfHookCanEmit, soeOPTIONAL},
             {sfHookNamespace, soeREQUIRED},
             {sfHookParameters, soeREQUIRED},
             {sfHookApiVersion, soeREQUIRED},  

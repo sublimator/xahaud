@@ -183,6 +183,7 @@ CONSTRUCT_TYPED_SFIELD(sfEmitBurden,            "EmitBurden",           UINT64, 
 CONSTRUCT_TYPED_SFIELD(sfHookInstructionCount,  "HookInstructionCount", UINT64,    17);
 CONSTRUCT_TYPED_SFIELD(sfHookReturnCode,        "HookReturnCode",       UINT64,    18);
 CONSTRUCT_TYPED_SFIELD(sfReferenceCount,        "ReferenceCount",       UINT64,    19);
+CONSTRUCT_TYPED_SFIELD(sfTouchCount,            "TouchCount",           UINT64,    97);
 CONSTRUCT_TYPED_SFIELD(sfAccountIndex,          "AccountIndex",         UINT64,    98);
 CONSTRUCT_TYPED_SFIELD(sfAccountCount,          "AccountCount",         UINT64,    99);
 CONSTRUCT_TYPED_SFIELD(sfRewardAccumulator,     "RewardAccumulator",    UINT64,   100);
@@ -210,6 +211,7 @@ CONSTRUCT_TYPED_SFIELD(sfNFTokenID,             "NFTokenID",            UINT256,
 CONSTRUCT_TYPED_SFIELD(sfEmitParentTxnID,       "EmitParentTxnID",      UINT256,   11);
 CONSTRUCT_TYPED_SFIELD(sfEmitNonce,             "EmitNonce",            UINT256,   12);
 CONSTRUCT_TYPED_SFIELD(sfEmitHookHash,          "EmitHookHash",         UINT256,   13);
+CONSTRUCT_TYPED_SFIELD(sfObjectID,              "ObjectID",             UINT256,   14);
 
 // 256-bit (uncommon)
 CONSTRUCT_TYPED_SFIELD(sfBookDirectory,         "BookDirectory",        UINT256,   16);
@@ -236,6 +238,7 @@ CONSTRUCT_TYPED_SFIELD(sfURITokenID,            "URITokenID",           UINT256,
 CONSTRUCT_TYPED_SFIELD(sfGovernanceFlags,       "GovernanceFlags",      UINT256,   99);
 CONSTRUCT_TYPED_SFIELD(sfGovernanceMarks,       "GovernanceMarks",      UINT256,   98);
 CONSTRUCT_TYPED_SFIELD(sfEmittedTxnID,          "EmittedTxnID",         UINT256,   97);
+CONSTRUCT_TYPED_SFIELD(sfHookCanEmit,           "HookCanEmit",          UINT256,   96);
 
 // currency amount (common)
 CONSTRUCT_TYPED_SFIELD(sfAmount,                "Amount",               AMOUNT,     1);
@@ -290,6 +293,8 @@ CONSTRUCT_TYPED_SFIELD(sfHookReturnString,      "HookReturnString",     VL,     
 CONSTRUCT_TYPED_SFIELD(sfHookParameterName,     "HookParameterName",    VL,        24);
 CONSTRUCT_TYPED_SFIELD(sfHookParameterValue,    "HookParameterValue",   VL,        25);
 CONSTRUCT_TYPED_SFIELD(sfBlob,                  "Blob",                 VL,        26);
+CONSTRUCT_TYPED_SFIELD(sfRemarkValue,           "RemarkValue",          VL,        98);
+CONSTRUCT_TYPED_SFIELD(sfRemarkName,            "RemarkName",           VL,        99);
 
 // account
 CONSTRUCT_TYPED_SFIELD(sfAccount,               "Account",              ACCOUNT,    1);
@@ -344,6 +349,7 @@ CONSTRUCT_UNTYPED_SFIELD(sfHookExecution,       "HookExecution",        OBJECT, 
 CONSTRUCT_UNTYPED_SFIELD(sfHookDefinition,      "HookDefinition",       OBJECT,    22);
 CONSTRUCT_UNTYPED_SFIELD(sfHookParameter,       "HookParameter",        OBJECT,    23);
 CONSTRUCT_UNTYPED_SFIELD(sfHookGrant,           "HookGrant",            OBJECT,    24);
+CONSTRUCT_UNTYPED_SFIELD(sfRemark,              "Remark",               OBJECT,    97);
 CONSTRUCT_UNTYPED_SFIELD(sfGenesisMint,         "GenesisMint",          OBJECT,    96);
 CONSTRUCT_UNTYPED_SFIELD(sfActiveValidator,     "ActiveValidator",      OBJECT,    95);
 CONSTRUCT_UNTYPED_SFIELD(sfImportVLKey,         "ImportVLKey",          OBJECT,    94);
@@ -370,6 +376,7 @@ CONSTRUCT_UNTYPED_SFIELD(sfDisabledValidators,  "DisabledValidators",   ARRAY,  
 CONSTRUCT_UNTYPED_SFIELD(sfHookExecutions,      "HookExecutions",       ARRAY,     18);
 CONSTRUCT_UNTYPED_SFIELD(sfHookParameters,      "HookParameters",       ARRAY,     19);
 CONSTRUCT_UNTYPED_SFIELD(sfHookGrants,          "HookGrants",           ARRAY,     20);
+CONSTRUCT_UNTYPED_SFIELD(sfRemarks,             "Remarks",              ARRAY,     97);
 CONSTRUCT_UNTYPED_SFIELD(sfGenesisMints,        "GenesisMints",         ARRAY,     96);
 CONSTRUCT_UNTYPED_SFIELD(sfActiveValidators,    "ActiveValidators",     ARRAY,     95);
 CONSTRUCT_UNTYPED_SFIELD(sfImportVLKeys,        "ImportVLKeys",         ARRAY,     94);

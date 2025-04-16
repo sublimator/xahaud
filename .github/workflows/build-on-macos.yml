@@ -1,0 +1,130 @@
+name: Build on MacOS 15.2
+
+on:
+  push:
+    branches: [ "dev", "candidate", "release", "jshooks" ]
+  pull_request:
+    branches: [ "dev", "candidate", "release", "jshooks" ]
+
+env:
+  XAHAUD_DEPS: /Users/runner/xahaud_deps
+
+# This means that if you push a new commit to a branch or PR that previously running
+# jobs are canceled and re-run. This is useful for preventing duplicated work.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    steps:
+      # ----------------------------------------
+      # 1. Check Out Repository
+      # ----------------------------------------
+      - name: Check out repository
+        uses: actions/checkout@v3
+
+      # ----------------------------------------
+      # 2. Make All Scripts Executable
+      # ----------------------------------------
+      - name: Make scripts executable
+        run: find Builds/macos -name "*.sh" -exec chmod +x {} \;
+
+      # ----------------------------------------
+      # 3. Set Up Dependency Directory
+      # ----------------------------------------
+      - name: Create XAHAUD_DEPS directory
+        run: mkdir -p "$XAHAUD_DEPS"
+
+      # ----------------------------------------
+      # 4. Install Brew Dependencies
+      # ----------------------------------------
+      - name: Install brew dependencies
+        run: |
+          ./Builds/macos/install-brew-deps.sh
+
+      # ----------------------------------------
+      # 5. Cache & Build Boost
+      # ----------------------------------------
+      - name: Cache Boost
+        id: cache-boost
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.XAHAUD_DEPS }}/boost_*
+          key: macos-15-boost-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Builds/macos/install-boost.sh', 'Builds/macos/env.sh') }}
+          restore-keys: |
+            macos-15-boost-${{ runner.os }}-${{ runner.arch }}-
+            macos-15-boost-${{ runner.os }}-
+            macos-15-boost-
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          ./Builds/macos/install-boost.sh
+
+      # ----------------------------------------
+      # 6. Cache & Build Protobuf
+      # ----------------------------------------
+      - name: Cache Protobuf
+        id: cache-protobuf
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.XAHAUD_DEPS }}/protobuf-*
+          key: macos-15-protobuf-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Builds/macos/install-protobuf.sh', 'Builds/macos/env.sh') }}
+          restore-keys: |
+            macos-15-protobuf-${{ runner.os }}-${{ runner.arch }}-
+            macos-15-protobuf-${{ runner.os }}-
+            macos-15-protobuf-
+
+      - name: Build Protobuf
+        if: steps.cache-protobuf.outputs.cache-hit != 'true'
+        run: |
+          ./Builds/macos/install-protobuf.sh
+
+      # ----------------------------------------
+      # 7. Cache & Build WasmEdge
+      # ----------------------------------------
+      - name: Cache WasmEdge
+        id: cache-wasm-edge
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.XAHAUD_DEPS }}/WasmEdge-*
+          key: macos-15-wasm-edge-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Builds/macos/install-wasm-edge.sh', 'Builds/macos/env.sh') }}
+          restore-keys: |
+            macos-15-wasm-edge-${{ runner.os }}-${{ runner.arch }}-
+            macos-15-wasm-edge-${{ runner.os }}-
+            macos-15-wasm-edge-
+
+      - name: Build WasmEdge
+        if: steps.cache-wasm-edge.outputs.cache-hit != 'true'
+        run: |
+          ./Builds/macos/install-wasm-edge.sh
+
+      # ----------------------------------------
+      # 8. Cache & Install .nih_c Dependencies
+      # ----------------------------------------
+      - name: Cache .nih_c Dependencies
+        id: cache-nih-c
+        uses: actions/cache@v3
+        with:
+          path: ${{ github.workspace }}/.nih_c
+          key: macos-15-nih-c-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            macos-15-nih-c-${{ runner.os }}-${{ runner.arch }}-
+            macos-15-nih-c-${{ runner.os }}-
+            macos-15-nih-c-
+
+      # ----------------------------------------
+      # 9. Build Xahaud
+      # ----------------------------------------
+      - name: Build Xahaud
+        run: |
+          ./Builds/macos/build-xahaud.sh
+
+      # ----------------------------------------
+      # 10. Run Tests
+      # ----------------------------------------
+      - name: Run Tests
+        run: |
+          ./build/rippled -u
