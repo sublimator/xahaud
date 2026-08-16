@@ -32,6 +32,7 @@
 #include <xrpl/beast/core/CurrentThreadName.h>
 #include <xrpl/json/to_string.h>
 #include <xrpl/protocol/BuildInfo.h>
+#include <xrpl/protocol/ServerDefinitions.h>
 #include <xrpl/resource/Fees.h>
 
 #ifdef ENABLE_TESTS
@@ -522,12 +523,16 @@ run(int argc, char** argv)
     {
         std::cout << "xahaud version " << BuildInfo::getVersionString()
                   << std::endl;
-#ifdef GIT_COMMIT_HASH
-        std::cout << "Git commit hash: " << GIT_COMMIT_HASH << std::endl;
-#endif
-#ifdef GIT_BRANCH
-        std::cout << "Git build branch: " << GIT_BRANCH << std::endl;
-#endif
+        if (!BuildInfo::getGitCommitHash().empty())
+        {
+            std::cout << "Git commit hash: " << BuildInfo::getGitCommitString()
+                      << std::endl;
+        }
+        if (!BuildInfo::getGitBranch().empty())
+        {
+            std::cout << "Git build branch: " << BuildInfo::getGitBranch()
+                      << std::endl;
+        }
         return 0;
     }
 

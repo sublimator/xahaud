@@ -26,6 +26,7 @@
 #include <boost/container/flat_map.hpp>
 #include <algorithm>
 #include <forward_list>
+#include <vector>
 
 namespace ripple {
 
@@ -53,6 +54,19 @@ public:
             : soTemplate_(uniqueFields, commonFields), name_(name), type_(type)
         {
             // Verify that KeyType is appropriate.
+            static_assert(
+                std::is_enum<KeyType>::value ||
+                    std::is_integral<KeyType>::value,
+                "KnownFormats KeyType must be integral or enum.");
+        }
+
+        Item(
+            char const* name,
+            KeyType type,
+            std::initializer_list<SOElement> uniqueFields,
+            std::vector<SOElement> const& commonFields)
+            : soTemplate_(uniqueFields, commonFields), name_(name), type_(type)
+        {
             static_assert(
                 std::is_enum<KeyType>::value ||
                     std::is_integral<KeyType>::value,
@@ -171,6 +185,28 @@ protected:
         KeyType type,
         std::initializer_list<SOElement> uniqueFields,
         std::initializer_list<SOElement> commonFields = {})
+    {
+        if (auto const item = findByType(type))
+        {
+            LogicError(
+                std::string("Duplicate key for item '") + name +
+                "': already maps to " + item->getName());
+        }
+
+        formats_.emplace_front(name, type, uniqueFields, commonFields);
+        Item const& item{formats_.front()};
+
+        names_[name] = &item;
+        types_[type] = &item;
+
+        return item;
+    }
+
+    Item const&
+    add(char const* name,
+        KeyType type,
+        std::initializer_list<SOElement> uniqueFields,
+        std::vector<SOElement> const& commonFields)
     {
         if (auto const item = findByType(type))
         {

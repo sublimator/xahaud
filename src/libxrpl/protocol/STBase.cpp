@@ -17,8 +17,10 @@
 */
 //==============================================================================
 
+#include <xrpl/basics/strHex.h>
 #include <xrpl/beast/utility/instrumentation.h>
 #include <xrpl/protocol/STBase.h>
+#include <xrpl/protocol/Serializer.h>
 #include <boost/checked_delete.hpp>
 
 namespace ripple {
@@ -99,6 +101,47 @@ Json::Value
 STBase::getJson(JsonOptions /*options*/) const
 {
     return getText();
+}
+
+Json::Value
+STBase::getJsonDebug(JsonDebugOptions /*options*/) const
+{
+    Json::Value item(Json::objectValue);
+
+    if (getFName().isUseful())
+    {
+        item["name"] = getFName().getJsonName();
+        Serializer idS;
+        addFieldID(idS);
+        item["header"] = strHex(idS.peekData());
+    }
+
+    Serializer valS;
+    add(valS);
+    Blob const& valData = valS.peekData();
+    SerializedTypeID const sType = getSType();
+
+    if (sType == STI_VL || sType == STI_ACCOUNT || sType == STI_VECTOR256)
+    {
+        if (valData.empty())
+        {
+            item["vl"] = "";
+            item["value"] = "";
+        }
+        else
+        {
+            int const lenBytes = Serializer::decodeLengthLength(valData[0]);
+            item["vl"] = strHex(Slice(valData.data(), lenBytes));
+            item["value"] = strHex(
+                Slice(valData.data() + lenBytes, valData.size() - lenBytes));
+        }
+    }
+    else
+    {
+        item["value"] = strHex(valData);
+    }
+
+    return item;
 }
 
 void

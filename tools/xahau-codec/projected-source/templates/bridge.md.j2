@@ -1,0 +1,35 @@
+# `bridge` Standalone Wire Specification
+
+An `STXChainBridge` is the ordered concatenation of four typed values. The
+standalone codec writes their payloads without the bridge field-ID header:
+
+1. locking-chain door (`STAccount`: VL prefix + 20-byte AccountID),
+2. locking-chain issue (`STIssue`: 20-byte native or 40-byte classic issue),
+3. issuing-chain door (`STAccount`: VL prefix + 20-byte AccountID),
+4. issuing-chain issue (`STIssue`: 20-byte native or 40-byte classic issue).
+
+Both door VL prefixes are normally `14` hex (decimal 20). Bridge issues use
+classic `Issue`, not the MPT `Asset` variant. The JSON constructor requires all
+four canonical keys, rejects invalid accounts and extra keys, and retains this
+fixed order regardless of JSON member order.
+
+**Materialization trap:** the raw constructor currently delegates each issue
+to the broader `STIssue` parser, so crafted bytes can materialize an MPT issue
+that bridge JSON refuses and bridge accessors do not support. Treat that output
+as diagnostic/noncanonical; do not infer that MPT bridge issues are valid.
+
+## JSON validation (`STXChainBridge::STXChainBridge`)
+
+{{ code('src/libxrpl/protocol/STXChainBridge.cpp', function='STXChainBridge::STXChainBridge', signature='SField const& name, Json::Value const& v') }}
+
+## Wire deserialization (`STXChainBridge::STXChainBridge`)
+
+{{ code('src/libxrpl/protocol/STXChainBridge.cpp', function='STXChainBridge::STXChainBridge', signature='SerialIter& sit') }}
+
+## Ordered serialization (`STXChainBridge::add`)
+
+{{ code('src/libxrpl/protocol/STXChainBridge.cpp', function='STXChainBridge::add') }}
+
+## Door account framing (`STAccount::add`)
+
+{{ code('src/libxrpl/protocol/STAccount.cpp', function='STAccount::add') }}

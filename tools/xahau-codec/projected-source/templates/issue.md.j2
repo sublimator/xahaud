@@ -1,0 +1,38 @@
+# `issue` Standalone Wire Specification
+
+An `issue` identifies native XAH, an issued currency, or an MPT issuance. Its
+standalone payload is self-discriminating and has no outer field header.
+
+## Variant layout
+
+| JSON form | Standalone payload | Decode discriminator |
+| :--- | :--- | :--- |
+| `{"currency":"XAH"}` | 20-byte zero currency | A zero first 20-byte word ends the issue immediately. An issuer is forbidden. |
+| `{"currency":"USD","issuer":"r..."}` | 20-byte currency + 20-byte issuer | A nonzero second word other than `noAccount()` selects a classic issue. Native/non-native currency and account must be consistent. |
+| `{"mpt_issuance_id":"<48 hex>"}` | 20-byte MPT issuer + 20-byte `noAccount()` sentinel + 4-byte sequence | The sentinel in the second word selects the 44-byte MPT form. Currency/issuer keys are mutually exclusive with `mpt_issuance_id`. |
+
+The first 20 bytes alone are not a general length prefix: their value selects
+whether another 0, 20, or 24 bytes must follow. Full-input consumption is
+therefore required to reject a valid short variant with trailing bytes.
+
+**Portability watch:** the MPT sequence leg is copied between the first four
+`MPTID` bytes and a native `uint32_t`, while `Serializer::add32` and
+`SerialIter::get32` provide big-endian wire I/O. The paired implementation
+round-trips on the current platform, but reviewers must compare this path with
+`makeMptID`'s explicit endian conversion before changing or porting it.
+
+## JSON variant selection (`assetFromJson`)
+
+{{ code('src/libxrpl/protocol/Asset.cpp', function='assetFromJson') }}
+
+## Wire deserialization (`STIssue::STIssue`)
+
+{{ code('src/libxrpl/protocol/STIssue.cpp', function='STIssue::STIssue', signature='SerialIter& sit') }}
+
+## Wire serialization (`STIssue::add`)
+
+{{ code('src/libxrpl/protocol/STIssue.cpp', function='STIssue::add') }}
+
+## MPT JSON validation (`mptIssueFromJson`)
+
+{{ code('src/libxrpl/protocol/MPTIssue.cpp', function='mptIssueFromJson') }}

@@ -26,6 +26,7 @@
 #include <initializer_list>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 namespace ripple {
 
@@ -128,6 +129,10 @@ public:
     SOTemplate(
         std::initializer_list<SOElement> uniqueFields,
         std::initializer_list<SOElement> commonFields = {});
+
+    SOTemplate(
+        std::initializer_list<SOElement> uniqueFields,
+        std::vector<SOElement> const& commonFields);
 
     /* Provide for the enumeration of fields */
     std::vector<SOElement>::const_iterator

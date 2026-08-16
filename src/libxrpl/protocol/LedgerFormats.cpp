@@ -18,21 +18,28 @@
 //==============================================================================
 
 #include <xrpl/protocol/LedgerFormats.h>
+#include <xrpl/protocol/SField.h>
+#include <xrpl/protocol/SOTemplate.h>
 #include <xrpl/protocol/jss.h>
 #include <utility>
+#include <vector>
 
 namespace ripple {
 
-LedgerFormats::LedgerFormats()
+std::vector<SOElement> const&
+LedgerFormats::getCommonFields()
 {
-    // Fields shared by all ledger formats:
-    static const std::initializer_list<SOElement> commonFields{
+    static std::vector<SOElement> const commonFields{
         {sfLedgerIndex, soeOPTIONAL},
         {sfLedgerEntryType, soeREQUIRED},
         {sfFlags, soeREQUIRED},
         {sfRemarks, soeOPTIONAL},
     };
+    return commonFields;
+}
 
+LedgerFormats::LedgerFormats()
+{
 #pragma push_macro("UNWRAP")
 #undef UNWRAP
 #pragma push_macro("LEDGER_ENTRY")
@@ -40,7 +47,7 @@ LedgerFormats::LedgerFormats()
 
 #define UNWRAP(...) __VA_ARGS__
 #define LEDGER_ENTRY(tag, value, name, rpcName, fields) \
-    add(jss::name, tag, UNWRAP fields, commonFields);
+    add(jss::name, tag, UNWRAP fields, getCommonFields());
 
 #include <xrpl/protocol/detail/ledger_entries.macro>
 

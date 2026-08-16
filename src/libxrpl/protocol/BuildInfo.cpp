@@ -21,6 +21,7 @@
 #include <xrpl/beast/core/LexicalCast.h>
 #include <xrpl/beast/core/SemanticVersion.h>
 #include <xrpl/protocol/BuildInfo.h>
+#include <xrpl/protocol/BuildInfoGenerated.h>
 #include <boost/preprocessor/stringize.hpp>
 #include <algorithm>
 #include <optional>
@@ -56,9 +57,9 @@ getVersionString()
         (versionString == std::string("0.") + std::string("0.0") ||
          versionString == std::string("0.0.0+DEBUG")))
     {
-        std::string y = std::string(__DATE__ + 7);
+        std::string y = std::string(&__DATE__[7]);
         std::string d = std::string(
-            __DATE__ + 4 + (__DATE__[4] == ' ' ? 1 : 0),
+            &__DATE__[4 + (__DATE__[4] == ' ' ? 1 : 0)],
             __DATE__[4] == ' ' ? 1 : 2);
         std::string m;
         switch (__DATE__[0])
@@ -247,6 +248,52 @@ isNewerVersion(std::uint64_t version)
     if (isRippledVersion(version))
         return version > getEncodedVersion();
     return false;
+}
+
+#ifndef GIT_COMMIT_HASH
+#define GIT_COMMIT_HASH ""
+#endif
+
+#ifndef GIT_BRANCH
+#define GIT_BRANCH ""
+#endif
+
+#ifndef GIT_DIRTY
+#define GIT_DIRTY 0
+#endif
+
+std::string const&
+getGitCommitHash()
+{
+    static std::string const hash = GIT_COMMIT_HASH;
+    return hash;
+}
+
+std::string const&
+getGitBranch()
+{
+    static std::string const branch = GIT_BRANCH;
+    return branch;
+}
+
+bool
+isGitDirty()
+{
+    return GIT_DIRTY != 0;
+}
+
+std::string const&
+getGitCommitString()
+{
+    static std::string const commit = []() {
+        std::string s = GIT_COMMIT_HASH;
+        if (s.empty())
+            return s;
+        if (isGitDirty())
+            s += "-dirty";
+        return s;
+    }();
+    return commit;
 }
 
 }  // namespace BuildInfo

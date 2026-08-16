@@ -1,0 +1,35 @@
+# `number` Standalone Wire Specification
+
+`number` uses Xahau's `Number` decimal representation and serializes its
+normalized signed mantissa and exponent as a fixed 12-byte payload:
+
+| Bytes | Component | Encoding |
+| :--- | :--- | :--- |
+| 0..7 | `mantissa` | Signed 64-bit integer, big-endian two's-complement bits. |
+| 8..11 | `exponent` | Signed 32-bit integer, big-endian two's-complement bits. |
+
+There is no outer field header. Decode requires exactly 12 bytes. Zero uses
+`Number`'s canonical zero state; nonzero values normalize to a 16-digit
+mantissa with exponent range -32768 through +32768.
+
+The CLI accepts a JSON string or integer. Its decimal grammar rejects leading
+zeroes (except `0`), incomplete fractions/exponents, and non-decimal values.
+Arbitrary-length significant input is reduced directly to 16 digits with one
+round-to-nearest-even step. The guard digit and every later sticky digit
+participate, avoiding both silent tail loss and double rounding.
+
+## CLI decimal parser (`parseNumberFromString`)
+
+{{ code('tools/xahau-codec/main.cpp', function='parseNumberFromString') }}
+
+## Number normalization (`Number::normalize`)
+
+{{ code('src/libxrpl/basics/Number.cpp', function='Number::normalize') }}
+
+## Wire deserialization (`STNumber::STNumber`)
+
+{{ code('src/libxrpl/protocol/STNumber.cpp', function='STNumber::STNumber', signature='SerialIter& sit') }}
+
+## Wire serialization (`STNumber::add`)
+
+{{ code('src/libxrpl/protocol/STNumber.cpp', function='STNumber::add') }}

@@ -421,6 +421,9 @@ JSS(ledger_min);              // in, out: AccountTx*
 JSS(ledger_time);             // out: NetworkOPs
 JSS(LEDGER_ENTRY_TYPES);      // out: RPC server_definitions
                               // matches definitions.json format
+JSS(LEDGER_ENTRY_FORMATS);    // out: RPC server_definitions
+JSS(LEDGER_ENTRY_FLAGS);      // out: RPC server_definitions
+JSS(INNER_OBJECT_FORMATS);    // out: RPC server_definitions
 JSS(levels);                  // LogLevels
 JSS(level);
 JSS(limit);                   // in/out: AccountTx*, AccountOffers,
@@ -731,6 +734,10 @@ JSS(TYPES);                 // out: RPC server_definitions
                             // matches definitions.json format
 JSS(TRANSACTION_FLAGS);     // out: RPC server_definitions
 JSS(TRANSACTION_FLAGS_INDICES);  // out: RPC server_definitions
+JSS(TRANSACTION_FORMATS);        // out: RPC server_definitions
+JSS(ACCOUNT_SET_FLAGS);          // out: RPC server_definitions
+JSS(optionality);                // out: RPC server_definitions
+JSS(common);                     // out: RPC server_definitions
 JSS(type_hex);                   // out: STPathSet
 JSS(unl);                        // out: UnlList
 JSS(unlimited);                  // out: Connection.h

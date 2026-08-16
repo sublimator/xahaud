@@ -1,0 +1,27 @@
+# `quality` Standalone Wire Specification
+
+Quality is an 8-byte sortable encoding of the offer rate `in / out`. Encoding
+accepts JSON `{"out": <amount>, "in": <amount>}`, computes that inverse ratio,
+and writes the returned unsigned integer in big-endian order.
+
+| Bits | Component |
+| :--- | :--- |
+| 63..56 | Decimal exponent plus 100 |
+| 55..0 | Mantissa |
+
+Lower unsigned encodings sort as better qualities for the taker. The JSON key
+order is an easy trap: `{"out":"2","in":"1"}` decodes as `0.5`, not `2`.
+Zero `out` and arithmetic failures return the zero sentinel. The standalone
+payload has no field header and decode requires exactly eight bytes.
+
+## Rate construction (`getRate`)
+
+{{ code('src/libxrpl/protocol/STAmount.cpp', function='getRate') }}
+
+## Rate decoding (`amountFromQuality`)
+
+{{ code('src/libxrpl/protocol/STAmount.cpp', function='amountFromQuality') }}
+
+## Quality wrapper (`Quality::Quality`)
+
+{{ code('src/libxrpl/protocol/Quality.cpp', function='Quality::Quality', signature='std::uint64_t value') }}

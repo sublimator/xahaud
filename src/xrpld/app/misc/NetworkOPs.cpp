@@ -2552,17 +2552,17 @@ NetworkOPsImp::getServerInfo(bool human, bool admin, bool counters)
             }
         }
 
-#if defined(GIT_COMMIT_HASH) || defined(GIT_BRANCH)
+        if (!BuildInfo::getGitCommitHash().empty() ||
+            !BuildInfo::getGitBranch().empty())
         {
             auto& x = (info[jss::git] = Json::objectValue);
-#ifdef GIT_COMMIT_HASH
-            x[jss::hash] = GIT_COMMIT_HASH;
-#endif
-#ifdef GIT_BRANCH
-            x[jss::branch] = GIT_BRANCH;
-#endif
+            if (!BuildInfo::getGitCommitHash().empty())
+                x[jss::hash] = BuildInfo::getGitCommitHash();
+            if (!BuildInfo::getGitBranch().empty())
+                x[jss::branch] = BuildInfo::getGitBranch();
+            if (BuildInfo::isGitDirty())
+                x["dirty"] = true;
         }
-#endif
     }
     info[jss::io_latency_ms] =
         static_cast<Json::UInt>(app_.getIOLatency().count());

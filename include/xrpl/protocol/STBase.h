@@ -90,6 +90,61 @@ struct JsonOptions
     }
 };
 
+struct JsonDebugOptions
+{
+    using underlying_t = unsigned int;
+    underlying_t value;
+
+    enum values : underlying_t {
+        // clang-format off
+        none                        = 0b0000'0000,
+
+        _all                        = 0b0000'0000
+        // clang-format on
+    };
+
+    constexpr JsonDebugOptions(underlying_t v = none) noexcept : value(v)
+    {
+    }
+
+    [[nodiscard]] constexpr explicit
+    operator underlying_t() const noexcept
+    {
+        return value;
+    }
+    [[nodiscard]] constexpr explicit
+    operator bool() const noexcept
+    {
+        return value != 0u;
+    }
+    [[nodiscard]] constexpr auto friend
+    operator==(JsonDebugOptions lh, JsonDebugOptions rh) noexcept
+        -> bool = default;
+    [[nodiscard]] constexpr auto friend
+    operator!=(JsonDebugOptions lh, JsonDebugOptions rh) noexcept
+        -> bool = default;
+
+    /// Returns JsonDebugOptions union of lh and rh
+    [[nodiscard]] constexpr JsonDebugOptions friend
+    operator|(JsonDebugOptions lh, JsonDebugOptions rh) noexcept
+    {
+        return {lh.value | rh.value};
+    }
+
+    /// Returns JsonDebugOptions intersection of lh and rh
+    [[nodiscard]] constexpr JsonDebugOptions friend
+    operator&(JsonDebugOptions lh, JsonDebugOptions rh) noexcept
+    {
+        return {lh.value & rh.value};
+    }
+
+    [[nodiscard]] constexpr JsonDebugOptions friend
+    operator~(JsonDebugOptions v) noexcept
+    {
+        return {~v.value & static_cast<underlying_t>(_all)};
+    }
+};
+
 namespace detail {
 class STVar;
 }
@@ -156,6 +211,8 @@ public:
     getText() const;
 
     virtual Json::Value getJson(JsonOptions /*options*/) const;
+
+    virtual Json::Value getJsonDebug(JsonDebugOptions /*options*/ = {}) const;
 
     virtual void
     add(Serializer& s) const;

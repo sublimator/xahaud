@@ -1,0 +1,32 @@
+# `iou-value` Standalone Wire Specification
+
+`iou-value` is the numeric 8-byte prefix of a classic 48-byte issued
+`STAmount`. It intentionally omits the 20-byte currency and 20-byte issuer and
+is therefore a numeric test-vector format, not a complete ledger amount.
+
+## Bit layout
+
+| Bits | Meaning | Adversarial note |
+| :--- | :--- | :--- |
+| 63 | Issued-currency discriminator; always 1 | A native amount word is not an IOU value even though it is also eight bytes. |
+| 62 | Positive flag | Zero is signless: canonical issued zero is `8000000000000000`. |
+| 61..54 | Exponent plus 97 | Canonical exponent range is -96 through +80. |
+| 53..0 | Mantissa | Nonzero canonical range is 10^15 through 10^16-1. |
+
+Encoding constructs a valid issued amount with dummy currency/issuer context,
+serializes it through `STAmount`, and returns only the first eight bytes.
+Decoding requires exactly eight bytes, supplies a valid dummy suffix so the
+real `STAmount` parser can enforce its invariants, and returns only the numeric
+value. No field header or amount suffix belongs in this standalone codec.
+
+## Decimal parsing (`amountFromString`)
+
+{{ code('src/libxrpl/protocol/STAmount.cpp', function='amountFromString') }}
+
+## Issued amount deserialization (`STAmount::STAmount`)
+
+{{ code('src/libxrpl/protocol/STAmount.cpp', function='STAmount::STAmount', signature='SerialIter& sit') }}
+
+## Amount serialization (`STAmount::add`)
+
+{{ code('src/libxrpl/protocol/STAmount.cpp', function='STAmount::add') }}

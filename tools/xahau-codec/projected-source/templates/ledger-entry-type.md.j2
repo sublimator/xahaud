@@ -1,0 +1,22 @@
+# `ledger-entry-type` Standalone Wire Specification
+
+The codec maps a canonical ledger-entry format name such as `AccountRoot` to
+its protocol `LedgerEntryType` and writes that value as exactly two big-endian
+bytes. Decode performs the reverse lookup and rejects unregistered values.
+
+The input is a name, not a decimal type code. The registered values originate
+in `ledger_entries.macro`; deprecated/internal enum values that are not loaded
+into `LedgerFormats` are not silently accepted. There is no field header in
+the standalone payload.
+
+## Name lookup (`KnownFormats::findTypeByName`)
+
+{{ code('include/xrpl/protocol/KnownFormats.h', function='KnownFormats::findTypeByName') }}
+
+## Ledger format registry (`LedgerFormats::LedgerFormats`)
+
+{{ code('src/libxrpl/protocol/LedgerFormats.cpp', function='LedgerFormats::LedgerFormats') }}
+
+## Big-endian 16-bit serialization (`Serializer::add16`)
+
+{{ code('src/libxrpl/protocol/Serializer.cpp', function='Serializer::add16') }}

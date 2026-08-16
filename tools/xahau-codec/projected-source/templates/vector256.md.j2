@@ -1,0 +1,26 @@
+# `vector256` Standalone Wire Specification
+
+`vector256` serializes an ordered JSON array of 256-bit hashes. Unlike several
+other standalone codecs, its payload retains the ordinary XRPL VL length
+prefix:
+
+```text
+VL byte length of concatenated hashes || hash[0] || hash[1] || ...
+```
+
+Each hash contributes exactly 32 bytes, so the decoded VL length must be a
+multiple of 32. The VL prefix counts bytes, not elements. An empty vector is
+the single byte `00`. The enclosing field-ID header used inside an `STObject`
+is not part of the standalone codec.
+
+## Wire deserialization (`STVector256::STVector256`)
+
+{{ code('src/libxrpl/protocol/STVector256.cpp', function='STVector256::STVector256', signature='SerialIter& sit') }}
+
+## VL serialization (`STVector256::add`)
+
+{{ code('src/libxrpl/protocol/STVector256.cpp', function='STVector256::add') }}
+
+## VL prefix encoding (`Serializer::addVL`)
+
+{{ code('src/libxrpl/protocol/Serializer.cpp', function='Serializer::addVL', signature='Slice const&') }}

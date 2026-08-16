@@ -19,6 +19,7 @@
 
 #include <xrpl/basics/Log.h>
 #include <xrpl/basics/contract.h>
+#include <xrpl/basics/strHex.h>
 #include <xrpl/protocol/STArray.h>
 #include <xrpl/protocol/STBase.h>
 
@@ -169,6 +170,31 @@ STArray::getJson(JsonOptions p) const
         }
     }
     return v;
+}
+
+Json::Value
+STArray::getJsonDebug(JsonDebugOptions options) const
+{
+    Json::Value item(Json::objectValue);
+    item["name"] = getFName().getJsonName();
+
+    Serializer idS;
+    addFieldID(idS);
+    item["header"] = strHex(idS.peekData());
+
+    Json::Value elements(Json::arrayValue);
+    for (STObject const& obj : v_)
+    {
+        if (obj.getSType() != STI_NOTPRESENT)
+            elements.append(obj.getJsonDebug(options));
+    }
+    item["elements"] = elements;
+
+    Serializer endS;
+    endS.addFieldID(STI_ARRAY, 1);
+    item["end_marker"] = strHex(endS.peekData());
+
+    return item;
 }
 
 void

@@ -22,6 +22,7 @@
 #include <xrpl/beast/unit_test.h>
 #include <xrpl/json/json_reader.h>
 #include <xrpl/protocol/Feature.h>
+#include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/jss.h>
 
 namespace ripple {
@@ -67,6 +68,14 @@ public:
             BEAST_EXPECT(result[jss::result].isMember(jss::TRANSACTION_FLAGS));
             BEAST_EXPECT(
                 result[jss::result].isMember(jss::TRANSACTION_FLAGS_INDICES));
+            BEAST_EXPECT(
+                result[jss::result].isMember(jss::TRANSACTION_FORMATS));
+            BEAST_EXPECT(
+                result[jss::result].isMember(jss::LEDGER_ENTRY_FORMATS));
+            BEAST_EXPECT(result[jss::result].isMember(jss::LEDGER_ENTRY_FLAGS));
+            BEAST_EXPECT(result[jss::result].isMember(jss::ACCOUNT_SET_FLAGS));
+            BEAST_EXPECT(
+                result[jss::result].isMember(jss::INNER_OBJECT_FORMATS));
             BEAST_EXPECT(result[jss::result].isMember(jss::TYPES));
             BEAST_EXPECT(result[jss::result].isMember(jss::hash));
             BEAST_EXPECT(result[jss::result][jss::status] == "success");
@@ -92,6 +101,107 @@ public:
             BEAST_EXPECT(fieldExists("taker_pays_funded"));
             BEAST_EXPECT(fieldExists("hash"));
             BEAST_EXPECT(fieldExists("index"));
+        }
+
+        // formats / flags / inner objects (Xahau tables, not rippled's)
+        {
+            auto const& jrr = result[jss::result];
+            auto const hasNamed = [](Json::Value const& arr, char const* name) {
+                for (auto const& el : arr)
+                {
+                    if (el[jss::name].asString() == name)
+                        return true;
+                }
+                return false;
+            };
+
+            BEAST_EXPECT(jrr[jss::TRANSACTION_FORMATS].isMember(jss::common));
+            BEAST_EXPECT(hasNamed(
+                jrr[jss::TRANSACTION_FORMATS][jss::common], "TransactionType"));
+            BEAST_EXPECT(jrr[jss::TRANSACTION_FORMATS].isMember("Payment"));
+            BEAST_EXPECT(hasNamed(
+                jrr[jss::TRANSACTION_FORMATS]["Payment"], "Destination"));
+            BEAST_EXPECT(jrr[jss::TRANSACTION_FORMATS].isMember("SetHook"));
+            BEAST_EXPECT(
+                hasNamed(jrr[jss::TRANSACTION_FORMATS]["SetHook"], "Hooks"));
+
+            BEAST_EXPECT(
+                jrr[jss::LEDGER_ENTRY_FORMATS].isMember("AccountRoot"));
+            BEAST_EXPECT(hasNamed(
+                jrr[jss::LEDGER_ENTRY_FORMATS]["AccountRoot"], "Account"));
+            BEAST_EXPECT(jrr[jss::LEDGER_ENTRY_FORMATS].isMember("Hook"));
+
+            BEAST_EXPECT(jrr[jss::INNER_OBJECT_FORMATS].isMember("Hook"));
+            BEAST_EXPECT(
+                hasNamed(jrr[jss::INNER_OBJECT_FORMATS]["Hook"], "HookHash"));
+            BEAST_EXPECT(jrr[jss::INNER_OBJECT_FORMATS].isMember("Memo"));
+
+            BEAST_EXPECT(
+                jrr[jss::TRANSACTION_FLAGS]["CronSet"]["tfCronUnset"]
+                    .asUInt() == 1);
+            BEAST_EXPECT(
+                jrr[jss::TRANSACTION_FLAGS]["XChainModifyBridge"]
+                   ["tfClearAccountCreateAmount"]
+                       .asUInt() == 0x00010000);
+            BEAST_EXPECT(
+                jrr[jss::TRANSACTION_FLAGS]["SetRemarks"]["tfImmutable"]
+                    .asUInt() == 1);
+            BEAST_EXPECT(
+                jrr[jss::TRANSACTION_FLAGS]["SetHook"]["hsfOVERRIDE"]
+                    .asUInt() == 1);
+
+            BEAST_EXPECT(!jrr[jss::LEDGER_ENTRY_FLAGS].isMember("Remark"));
+            BEAST_EXPECT(
+                !hasNamed(jrr[jss::TRANSACTION_FORMATS]["Payment"], "Account"));
+            BEAST_EXPECT(
+                jrr[jss::LEDGER_ENTRY_FLAGS]["AccountRoot"]["lsfTshCollect"]
+                    .asUInt() == 0x02000000);
+            BEAST_EXPECT(
+                jrr[jss::LEDGER_ENTRY_FLAGS]["AccountRoot"]
+                   ["lsfDisallowIncomingRemit"]
+                       .asUInt() == 0x80000000);
+            BEAST_EXPECT(
+                jrr[jss::LEDGER_ENTRY_FLAGS]["AccountRoot"]["lsfURITokenIssuer"]
+                    .asUInt() == 0x40000000);
+            BEAST_EXPECT(
+                jrr[jss::LEDGER_ENTRY_FLAGS]["DirectoryNode"]["lsfEmittedDir"]
+                    .asUInt() == 0x00000004);
+            BEAST_EXPECT(
+                jrr[jss::LEDGER_ENTRY_FLAGS]["URIToken"]["lsfBurnable"]
+                    .asUInt() == 1);
+            BEAST_EXPECT(
+                jrr[jss::ACCOUNT_SET_FLAGS]["asfTshCollect"].asUInt() == 11);
+
+            // Object/Array end markers are serialized (rippled fix)
+            for (auto const& field : jrr[jss::FIELDS])
+            {
+                if (field[0u].asString() == "ObjectEndMarker" ||
+                    field[0u].asString() == "ArrayEndMarker")
+                {
+                    BEAST_EXPECT(field[1][jss::isSerialized].asBool());
+                }
+            }
+
+            // getAllLedgerFlags covers every Xahau lsf group
+            for (auto const& [typeName, flagMap] : getAllLedgerFlags())
+            {
+                if (typeName == "Remark")
+                    continue;
+                BEAST_EXPECT(jrr[jss::LEDGER_ENTRY_FLAGS].isMember(typeName));
+                for (auto const& [flagName, flagValue] : flagMap)
+                {
+                    BEAST_EXPECT(
+                        jrr[jss::LEDGER_ENTRY_FLAGS][typeName].isMember(
+                            flagName));
+                    if (jrr[jss::LEDGER_ENTRY_FLAGS][typeName].isMember(
+                            flagName))
+                    {
+                        BEAST_EXPECT(
+                            jrr[jss::LEDGER_ENTRY_FLAGS][typeName][flagName]
+                                .asUInt() == flagValue);
+                    }
+                }
+            }
         }
 
         // verify no duplicate field names in FIELDS array
@@ -131,6 +241,12 @@ public:
             BEAST_EXPECT(!result[jss::result].isMember(jss::TRANSACTION_FLAGS));
             BEAST_EXPECT(
                 !result[jss::result].isMember(jss::TRANSACTION_FLAGS_INDICES));
+            BEAST_EXPECT(
+                !result[jss::result].isMember(jss::TRANSACTION_FORMATS));
+            BEAST_EXPECT(
+                !result[jss::result].isMember(jss::LEDGER_ENTRY_FORMATS));
+            BEAST_EXPECT(
+                !result[jss::result].isMember(jss::LEDGER_ENTRY_FLAGS));
             BEAST_EXPECT(!result[jss::result].isMember(jss::TYPES));
             BEAST_EXPECT(result[jss::result].isMember(jss::hash));
         }

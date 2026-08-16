@@ -18,40 +18,53 @@
 //==============================================================================
 
 #include <xrpl/protocol/SOTemplate.h>
+#include <vector>
 
 namespace ripple {
+
+namespace {
+
+void
+finishTemplate(std::vector<SOElement>& elements, std::vector<int>& indices)
+{
+    for (std::size_t i = 0; i < elements.size(); ++i)
+    {
+        SField const& sField{elements[i].sField()};
+
+        if (sField.getNum() <= 0 || sField.getNum() >= indices.size())
+            Throw<std::runtime_error>("Invalid field index for SOTemplate.");
+
+        if (indices[sField.getNum()] != -1)
+            Throw<std::runtime_error>(
+                std::string("Duplicate field index for SOTemplate. ") +
+                sField.fieldName);
+
+        indices[sField.getNum()] = static_cast<int>(i);
+    }
+}
+
+}  // namespace
 
 SOTemplate::SOTemplate(
     std::initializer_list<SOElement> uniqueFields,
     std::initializer_list<SOElement> commonFields)
     : indices_(SField::getNumFields() + 1, -1)  // Unmapped indices == -1
 {
-    // Add all SOElements.
     elements_.reserve(uniqueFields.size() + commonFields.size());
     elements_.assign(uniqueFields);
     elements_.insert(elements_.end(), commonFields);
+    finishTemplate(elements_, indices_);
+}
 
-    // Validate and index elements_.
-    for (std::size_t i = 0; i < elements_.size(); ++i)
-    {
-        SField const& sField{elements_[i].sField()};
-
-        // Make sure the field's index is in range
-        //
-        if (sField.getNum() <= 0 || sField.getNum() >= indices_.size())
-            Throw<std::runtime_error>("Invalid field index for SOTemplate.");
-
-        // Make sure that this field hasn't already been assigned
-        //
-        if (getIndex(sField) != -1)
-            Throw<std::runtime_error>(
-                std::string("Duplicate field index for SOTemplate. ") +
-                sField.fieldName);
-
-        // Add the field to the index mapping table
-        //
-        indices_[sField.getNum()] = i;
-    }
+SOTemplate::SOTemplate(
+    std::initializer_list<SOElement> uniqueFields,
+    std::vector<SOElement> const& commonFields)
+    : indices_(SField::getNumFields() + 1, -1)
+{
+    elements_.reserve(uniqueFields.size() + commonFields.size());
+    elements_.assign(uniqueFields);
+    elements_.insert(elements_.end(), commonFields.begin(), commonFields.end());
+    finishTemplate(elements_, indices_);
 }
 
 int

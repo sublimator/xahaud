@@ -22,13 +22,14 @@
 #include <xrpl/protocol/SField.h>
 #include <xrpl/protocol/SOTemplate.h>
 #include <xrpl/protocol/jss.h>
+#include <vector>
 
 namespace ripple {
 
-TxFormats::TxFormats()
+std::vector<SOElement> const&
+TxFormats::getCommonFields()
 {
-    // Fields shared by all txFormats:
-    static const std::initializer_list<SOElement> commonFields{
+    static std::vector<SOElement> const commonFields{
         {sfTransactionType, soeREQUIRED},
         {sfFlags, soeOPTIONAL},
         {sfSourceTag, soeOPTIONAL},
@@ -50,7 +51,11 @@ TxFormats::TxFormats()
         {sfHookParameters, soeOPTIONAL},
         {sfHookName, soeOPTIONAL},
     };
+    return commonFields;
+}
 
+TxFormats::TxFormats()
+{
 #pragma push_macro("UNWRAP")
 #undef UNWRAP
 #pragma push_macro("TRANSACTION")
@@ -58,7 +63,7 @@ TxFormats::TxFormats()
 
 #define UNWRAP(...) __VA_ARGS__
 #define TRANSACTION(tag, value, name, fields) \
-    add(jss::name, tag, UNWRAP fields, commonFields);
+    add(jss::name, tag, UNWRAP fields, getCommonFields());
 
 #include <xrpl/protocol/detail/transactions.macro>
 

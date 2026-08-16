@@ -1,0 +1,30 @@
+# `pathset` Standalone Wire Specification
+
+A pathset is an ordered list of non-empty payment paths. Its standalone wire
+payload has no field-ID or VL prefix; it is self-framed by element masks and
+terminators.
+
+| Byte / bit | Meaning | Following payload |
+| :--- | :--- | :--- |
+| `01` bit | Account present | 20-byte AccountID |
+| `10` bit | Currency present | 20-byte Currency |
+| `20` bit | Issuer present | 20-byte AccountID |
+| `FF` | Boundary between alternate paths | No payload |
+| `00` | End of the entire pathset | No payload |
+
+Mask bits may be combined, and payloads occur in account/currency/issuer
+order. Unknown mask bits fail. A leading `00` or `FF` would terminate an empty
+path, which the decoder rejects; the CLI therefore rejects empty JSON pathsets
+instead of emitting a non-round-trippable lone `00`.
+
+## Element masks (`STPathElement::Type`)
+
+{{ code('include/xrpl/protocol/STPathSet.h', function='STPathElement::getNodeType') }}
+
+## Wire deserialization (`STPathSet::STPathSet`)
+
+{{ code('src/libxrpl/protocol/STPathSet.cpp', function='STPathSet::STPathSet', signature='SerialIter& sit') }}
+
+## Wire serialization (`STPathSet::add`)
+
+{{ code('src/libxrpl/protocol/STPathSet.cpp', function='STPathSet::add') }}

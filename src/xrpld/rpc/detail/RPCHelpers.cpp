@@ -1065,7 +1065,10 @@ chooseLedgerEntryType(Json::Value const& params)
 #define LEDGER_ENTRY(tag, value, name, rpcName, fields) \
     {jss::name, jss::rpcName, tag},
 
+#pragma push_macro("EXPAND")
+#undef EXPAND
 #include <xrpl/protocol/detail/ledger_entries.macro>
+#pragma pop_macro("EXPAND")
 
 #undef LEDGER_ENTRY
 #pragma pop_macro("LEDGER_ENTRY")

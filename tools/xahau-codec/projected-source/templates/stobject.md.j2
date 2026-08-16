@@ -1,0 +1,47 @@
+# `STObject` Binary Wire Specification & Canonical Logic
+
+An `STObject` represents a serialized collection of typed fields. A top-level object ends when its input is exhausted and does not append its own terminator. An object carried as a field inside another object or array is framed by the field header and the object end marker `0xE1`.
+
+## 0. JSON Schema & Wire Mapping Table
+
+| JSON Property | C++ Symbol / Source | Wire Framing / Bytes | Direction & Trap / Invariant Notes |
+| :--- | :--- | :--- | :--- |
+| `name` | `field->getFName().fieldName` | N/A (metadata) | Resolved via `SField::getField(type, field)` on decode, `getFName()` on encode. |
+| `header` | `field->addFieldID(s)` | 1 to 3 bytes | Field ID header: `(type << 4) \| field` for common types. |
+| `vl` | `Serializer::addVL` | 1 to 3 bytes | **Length Prefix**: Length prefix for VL fields (`Blob`, `AccountID`, etc.) using thresholds 192 / 12480 / 918744. Distinct from header and value. |
+| `value` | `field->add(s)` | $N$ payload bytes | Raw value payload in hexadecimal. |
+| `fields` | `STObject::getSortedFields(obj)` | Ordered fields list | **Encode**: Sorted ascending by `fieldCode` ($(\text{type} \ll 16) \mid \text{field}$).<br>**Decode**: Read sequentially, checks for duplicate fields via `std::adjacent_find` in `STObject::set`. |
+| `elements` | `STArray::v_` | Ordered elements list | Array members (ordered list of `STObject` items, distinct from `fields` for objects). |
+| `end_marker` | `s.addFieldID(sType, 1)` | `0xE1` (Object) / `0xF1` (Array) | Real nested-scope terminator represented in protocol definitions as `ObjectEndMarker` / `ArrayEndMarker`. The serializer assembles the byte from type 14 or 15 and field number 1. |
+| `parts` | `STAmount::getJsonDebug` | N/A (decomposed) | Semantic discriminated union breakdown of compound types (`xahau-codec` debug extension). |
+
+---
+
+## 1. Deserialization (`STObject::set`)
+
+When deserializing from a `SerialIter`:
+- Field IDs (`(type, field)`) are read sequentially.
+- `NOP` padding markers (`type == 9 && field == 9`) are skipped. The counter
+  throws when incremented to 64, so at most 63 are accepted.
+- A nested object terminates when the object end marker (`type == STI_OBJECT && field == 1` $\to$ `0xE1`) is encountered; a top-level object terminates when the iterator is exhausted.
+- Enforces strict canonical invariants: duplicate field detection via adjacent find on sorted fields.
+
+{{ code('src/libxrpl/protocol/STObject.cpp', function='STObject::set', signature='int depth') }}
+
+---
+
+## 2. Serialization & Field Sorting (`STObject::add`)
+
+When serializing to binary:
+1. **Canonical Field Ordering**: All fields present in the object are sorted strictly ascending by `fieldCode`:
+   $$\text{fieldCode} = (\text{fieldType} \ll 16) \mid \text{fieldValue}$$
+2. Each field writes its `FieldID` header, followed by its payload serialization (`field->add(s)`).
+3. After a nested `STObject` or `STArray` field payload, the containing object appends its real termination marker (`0xE1` for Object, `0xF1` for Array). A top-level `STObject::add` call has no surrounding field and therefore adds no final marker for itself.
+
+### Wire Serialization (`STObject::add`)
+
+{{ code('src/libxrpl/protocol/STObject.cpp', function='STObject::add', signature='WhichFields') }}
+
+### Canonical Field Ordering (`STObject::getSortedFields`)
+
+{{ code('src/libxrpl/protocol/STObject.cpp', function='STObject::getSortedFields') }}

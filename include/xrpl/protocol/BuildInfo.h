@@ -43,6 +43,24 @@ getVersionString();
 std::string const&
 getFullVersionString();
 
+/** Git commit hash (e.g. 40-char hex string, or empty if unknown). */
+std::string const&
+getGitCommitHash();
+
+/** Git branch name (e.g. "dev", "hookz-test-vectors", or empty). */
+std::string const&
+getGitBranch();
+
+/** Returns true if there were uncommitted modifications in the working tree at
+ * build time. */
+bool
+isGitDirty();
+
+/** Returns Git commit hash, appended with "-dirty" if uncommitted changes
+ * exist. */
+std::string const&
+getGitCommitString();
+
 /** Encode an arbitrary server software version in a 64-bit integer.
 
     The general format is:

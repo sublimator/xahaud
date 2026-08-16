@@ -1,0 +1,81 @@
+# `STAmount` Binary Wire Specification & Canonical Logic
+
+An `STAmount` represents an asset balance or payment quantity. It has three distinct wire representations: **Native (XRP/XAH drops)**, **IOU (issued currencies)**, and **MPT (Multi-Purpose Tokens)**.
+
+---
+
+## 1. JSON Schema & Wire Mapping Table
+
+| JSON Field | C++ Member / Constant | Wire Encoding / Derivation | Trap / Semantic Invariant |
+| :--- | :--- | :--- | :--- |
+| `parts.type` | `mAsset` | Classic IOU: bit 63 set. MPT: bit 63 clear and bit 61 set. Native: both clear. | Discriminated union tag: `"native"`, `"iou"`, or `"mpt"`. MPT uses a separate flag byte followed by an 8-byte quantity; it is not the classic 8-byte IOU word. |
+| `parts.exponent` | `mOffset` | Centered exponent: Bits 61..54 ($\text{raw} - 97$) | **Trap**: Local var `offset` in `STAmount` constructor is the raw 10 bits; member `mOffset` is centered ($-96 \dots +80$). |
+| `parts.mantissa` | `mValue` | Low 54 bits (bits 53..0) | IOU mantissa ($10^{15} \dots 10^{16}-1$). Discriminated union avoids C++ `mValue` overloading. |
+| `parts.drops` | `mValue` | Native value bits 60..0; bit 61 must be clear or the parser selects MPT | JSON/network-legal drops are $0 \dots 10^{17}$. The raw constructor itself does not call `isLegalNet`, so decode can materialize larger bit-level values. |
+| `parts.value` | `mValue` | Bytes 1..8 after the MPT flag byte | Full 64-bit MPT token quantity. It is reconstructed by shifting the first 64-bit read and consuming the ninth byte. |
+| `parts.mpt_id` | `mAsset.get<MPTIssue>()` | MPT bytes 9..32 (24 bytes / 192 bits) | MPTokenIssuanceID (big-endian Sequence + Issuer AccountID). |
+| `parts.negative` | `mIsNegative` | Bit 62 (`cPositive`) inverted | `true` if negative, `false` if non-negative. |
+| `parts.issuer` | `mAsset.get<Issue>().account` | Trailing bytes 28..47 (160 bits) | **Trap**: C++ member is `account`, but XRPL JSON API and external specifications call it `issuer`. |
+| `parts.currency` | `mAsset.get<Issue>().currency` | Trailing bytes 8..27 (160 bits) | 160-bit currency code (canonical 3-char ASCII or 40 hex). |
+| `parts.zero` | `*this == beast::zero` | `0x8000000000000000` + 20B currency + 20B issuer | **Trap**: Canonical zero IOU has 8-byte `0x8000000000000000` (bit 62=0, signless) followed by non-zero currency & issuer (40 zero bytes is invalid and throws). Numeric fields omitted. |
+
+---
+
+## 2. Variant wire layouts
+
+### Native: 8 bytes
+
+* Bit 63 is clear and bit 61 (`cMPToken`) is clear.
+* Bit 62 (`cPositive`) is set for non-negative values and clear for negative.
+* The remaining value bits contain drops. Canonical zero is
+  `0x4000000000000000`.
+
+### Classic IOU: 48 bytes
+
+* First 8 bytes: bit 63 (`cIssuedCurrency`) is set; bit 62 is the positive
+  flag; bits 61..54 contain exponent + 97; bits 53..0 contain the mantissa.
+* Next 20 bytes: currency.
+* Final 20 bytes: issuer AccountID.
+* Canonical IOU zero starts with `0x8000000000000000` (signless) and still
+  carries a non-native currency and issuer.
+
+### MPT: 33 bytes
+
+* Byte 0: bit 63 clear, bit 61 (`cMPToken`) set, and bit 62 set for
+  non-negative values.
+* Bytes 1..8: full 64-bit quantity.
+* Bytes 9..32: 24-byte MPTokenIssuanceID.
+
+The parser initially reads eight bytes for discrimination. On the MPT path it
+shifts that value left eight bits and consumes one more byte to recover the
+eight quantity bytes following the flag.
+
+### Raw decode versus JSON/network validity
+
+`STAmount(SerialIter&)` enforces classic IOU canonical mantissa/exponent rules,
+but it is a binary materializer rather than the final ledger-validity gate. In
+particular, it does not call `isLegalNet` for native drops and does not apply
+the JSON constructor's MPT range/negative-zero normalization. Consequently,
+some crafted raw values decode for inspection but do not re-encode from their
+JSON presentation to identical bytes. Fixture consumers must distinguish
+accepted binary materialization from a network-legal canonical amount.
+
+{{ code('include/xrpl/protocol/STAmount.h', function='isLegalNet') }}
+
+---
+
+## 3. Wire Deserialization (`STAmount::STAmount`)
+
+{{ code('src/libxrpl/protocol/STAmount.cpp', function='STAmount::STAmount', signature='SerialIter& sit') }}
+
+---
+
+## 4. Wire Serialization (`STAmount::add`)
+
+{{ code('src/libxrpl/protocol/STAmount.cpp', function='STAmount::add') }}
+
+---
+
+## 5. Normalization & Canonical Invariants (`STAmount::canonicalize`)
+
+{{ code('src/libxrpl/protocol/STAmount.cpp', function='STAmount::canonicalize') }}

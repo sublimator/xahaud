@@ -155,6 +155,9 @@ public:
     Json::Value
     getJson(JsonOptions options) const override;
 
+    Json::Value
+    getJsonDebug(JsonDebugOptions options = {}) const override;
+
     void
     addWithoutSigningFields(Serializer& s) const;
 

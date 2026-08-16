@@ -127,6 +127,9 @@ public:
     Json::Value
     getJson(JsonOptions index) const override;
 
+    Json::Value
+    getJsonDebug(JsonDebugOptions options = {}) const override;
+
     void
     add(Serializer& s) const override;
 

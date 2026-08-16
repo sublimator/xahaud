@@ -21,25 +21,7 @@ endif()
 project (xrpl)
 set(Boost_NO_BOOST_CMAKE ON)
 
-# make GIT_COMMIT_HASH define available to all sources
-find_package(Git)
-if(Git_FOUND)
-    execute_process(COMMAND ${GIT_EXECUTABLE} --git-dir=${CMAKE_CURRENT_SOURCE_DIR}/.git rev-parse HEAD
-        OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE gch)
-    if(gch)
-        set(GIT_COMMIT_HASH "${gch}")
-        message(STATUS gch: ${GIT_COMMIT_HASH})
-        add_definitions(-DGIT_COMMIT_HASH="${GIT_COMMIT_HASH}")
-    endif()
-
-    execute_process(COMMAND ${GIT_EXECUTABLE} --git-dir=${CMAKE_CURRENT_SOURCE_DIR}/.git rev-parse --abbrev-ref HEAD
-        OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE gb)
-    if(gb)
-        set(GIT_BRANCH "${gb}")
-        message(STATUS gb: ${GIT_BRANCH})
-        add_definitions(-DGIT_BRANCH="${GIT_BRANCH}")
-    endif()
-endif() #git
+find_package(Git QUIET)
 
 # make SOURCE_ROOT_PATH define available for logging
 set(SOURCE_ROOT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/src/")
@@ -151,6 +133,108 @@ endif()
 
 set(PROJECT_EXPORT_SET RippleExports)
 include(RippledCore)
+
+# Refresh Git provenance whenever a target backed by libxrpl is requested.
+# The script writes only when values change, so an unchanged build remains a
+# no-op while commits, branch switches, and dirty/clean transitions rebuild
+# BuildInfo.cpp without requiring a CMake reconfigure. This also works when
+# .git is a worktree indirection file rather than a directory.
+set(XRPL_GIT_PROVENANCE_HEADER
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/xrpl/protocol/BuildInfoGenerated.h"
+)
+add_custom_target(xrpl_git_provenance
+  COMMAND "${CMAKE_COMMAND}"
+          "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+          "-DOUTPUT_FILE=${XRPL_GIT_PROVENANCE_HEADER}"
+          "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateGitProvenance.cmake"
+  BYPRODUCTS "${XRPL_GIT_PROVENANCE_HEADER}"
+  COMMENT "Refreshing Git build provenance"
+  VERBATIM
+)
+add_dependencies(xrpl.libxrpl.protocol xrpl_git_provenance)
+set_property(SOURCE src/libxrpl/protocol/BuildInfo.cpp APPEND PROPERTY
+  OBJECT_DEPENDS "${XRPL_GIT_PROVENANCE_HEADER}"
+)
+target_include_directories(xrpl.libxrpl.protocol PRIVATE
+  "${CMAKE_CURRENT_BINARY_DIR}/generated"
+)
+
+# Optional local differential-testing oracle for hooks-testing. This target is
+# excluded from the normal build and provides a small, supported C ABI so
+# Python can load real Xahau arithmetic with ctypes. The local dylib may still
+# expose transitive libxrpl symbols; only hookz_xahaud_* is supported.
+add_library(hookz_xahaud_oracle SHARED EXCLUDE_FROM_ALL
+  tools/hookz-oracle/HookzXahaudOracle.cpp
+)
+target_link_libraries(hookz_xahaud_oracle PRIVATE xrpl.libxrpl)
+target_include_directories(hookz_xahaud_oracle PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+set_target_properties(hookz_xahaud_oracle PROPERTIES
+  OUTPUT_NAME hookz_xahaud_oracle
+)
+
+# Optional host codec CLI. EXCLUDE_FROM_ALL: not part of default rippled.
+set(CODEC_SOURCE_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated/GeneratedCodecSource.cpp")
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  set(XAHAU_CODEC_PYTHON "${Python3_EXECUTABLE}")
+else()
+  set(XAHAU_CODEC_PYTHON python3)
+endif()
+add_custom_target(xahau_codec_source
+  COMMAND "${XAHAU_CODEC_PYTHON}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/xahau-codec/projected-source/extract_codec_source.py"
+          --generate-cpp "${CODEC_SOURCE_GENERATED}"
+  BYPRODUCTS "${CODEC_SOURCE_GENERATED}"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/xahau-codec/projected-source/extract_codec_source.py"
+  COMMENT "Refreshing projected codec source documentation"
+  VERBATIM
+)
+set_source_files_properties("${CODEC_SOURCE_GENERATED}" PROPERTIES GENERATED TRUE)
+
+add_executable(xahau-codec EXCLUDE_FROM_ALL
+  tools/xahau-codec/main.cpp
+  "${CODEC_SOURCE_GENERATED}"
+)
+add_dependencies(xahau-codec xahau_codec_source)
+target_link_libraries(xahau-codec PRIVATE xrpl.libxrpl)
+set_target_properties(xahau-codec PROPERTIES
+  OUTPUT_NAME xahau-codec
+)
+
+add_custom_target(xahau-codec-test
+  COMMAND "${XAHAU_CODEC_PYTHON}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/xahau-codec/test_cli.py"
+          --binary "$<TARGET_FILE:xahau-codec>"
+          --rippled "$<TARGET_FILE:rippled>"
+          --repo-root "${CMAKE_CURRENT_SOURCE_DIR}"
+  DEPENDS xahau-codec rippled
+  USES_TERMINAL
+  VERBATIM
+)
+
+add_custom_target(hookz_xahaud_oracle_test
+  COMMAND "${XAHAU_CODEC_PYTHON}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/hookz-oracle/test_oracle.py"
+          --library "$<TARGET_FILE:hookz_xahaud_oracle>"
+          --repo-root "${CMAKE_CURRENT_SOURCE_DIR}"
+  DEPENDS hookz_xahaud_oracle
+  USES_TERMINAL
+  VERBATIM
+)
+
+add_custom_target(hookz_float_vectors_test
+  COMMAND "${XAHAU_CODEC_PYTHON}"
+          "${CMAKE_CURRENT_SOURCE_DIR}/tools/hookz-oracle/test_vectors.py"
+          --binary "$<TARGET_FILE:rippled>"
+          --repo-root "${CMAKE_CURRENT_SOURCE_DIR}"
+  DEPENDS rippled
+  USES_TERMINAL
+  VERBATIM
+)
+
 include(RippledInstall)
 include(RippledDocs)
 include(RippledValidatorKeys)

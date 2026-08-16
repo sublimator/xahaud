@@ -18,6 +18,7 @@
 //==============================================================================
 
 #include <xrpl/basics/Log.h>
+#include <xrpl/basics/strHex.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/InnerObjectFormats.h>
 #include <xrpl/protocol/Rules.h>
@@ -198,6 +199,7 @@ STObject::applyTemplateFromSField(SField const& sField)
         applyTemplate(*elements);  // May throw
 }
 
+//@@start stobject-decode
 // return true = terminated with end-of-object
 bool
 STObject::set(SerialIter& sit, int depth)
@@ -277,6 +279,7 @@ STObject::set(SerialIter& sit, int depth)
 
     return reachedEndOfObject;
 }
+//@@end stobject-decode
 
 bool
 STObject::hasMatchingEntry(const STBase& t)
@@ -817,6 +820,40 @@ STObject::getJson(JsonOptions options) const
     return ret;
 }
 
+Json::Value
+STObject::getJsonDebug(JsonDebugOptions options) const
+{
+    auto getFields = [&]() {
+        Json::Value fields(Json::arrayValue);
+        for (STBase const* field : getSortedFields(*this, withAllFields))
+        {
+            if (field->getSType() != STI_NOTPRESENT &&
+                field->getFName().isBinary())
+            {
+                fields.append(field->getJsonDebug(options));
+            }
+        }
+        return fields;
+    };
+
+    if (!getFName().hasName() || getFName() == sfGeneric)
+        return getFields();
+
+    Json::Value item(Json::objectValue);
+    item["name"] = getFName().getJsonName();
+
+    Serializer idS;
+    addFieldID(idS);
+    item["header"] = strHex(idS.peekData());
+    item["fields"] = getFields();
+
+    Serializer endS;
+    endS.addFieldID(STI_OBJECT, 1);
+    item["end_marker"] = strHex(endS.peekData());
+
+    return item;
+}
+
 bool
 STObject::operator==(const STObject& obj) const
 {
@@ -860,6 +897,7 @@ STObject::operator==(const STObject& obj) const
     return true;
 }
 
+//@@start stobject-encode
 void
 STObject::add(Serializer& s, WhichFields whichFields) const
 {
@@ -910,5 +948,6 @@ STObject::getSortedFields(STObject const& objToSort, WhichFields whichFields)
 
     return sf;
 }
+//@@end stobject-encode
 
 }  // namespace ripple

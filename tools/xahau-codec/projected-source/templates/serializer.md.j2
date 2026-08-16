@@ -1,0 +1,74 @@
+# Binary Framing Specification (`Serializer` & `SerialIter`)
+
+The XRPL binary wire format uses standard framing primitives for **Field IDs** and **Variable-Length (VL) Prefixes**.
+
+## 0. JSON Schema & Wire Framing Mapping Table
+
+| JSON Property | C++ Symbol / Function | Wire Encoding | Description |
+| :--- | :--- | :--- | :--- |
+| `header` | `Serializer::addFieldID(type, name)` | 1 to 3 bytes | `(type < 16 && name < 16)` $\to$ `(type << 4) \| name` |
+| `vl` | `Serializer::addVL` / `encodeLengthLength` | 1 to 3 bytes | Length prefix: 1 byte ($0..192$), 2 bytes ($193..12480$), 3 bytes ($12481..918744$) |
+| `value` | `Serializer::add*` / `field->add(s)` | $N$ payload bytes | Raw field value payload in hexadecimal |
+| `name` | `SField::getName()` | N/A (metadata) | Canonical SField identifier |
+
+---
+
+## 1. Field ID Header Framing
+
+Every serialized field begins with a Field ID header encoding its `(fieldType, fieldValue)` pair:
+
+* **1-Byte Header**: When both `type < 16` and `field < 16`:
+  $$\text{header} = (\text{type} \ll 4) \mid \text{field}$$
+* **2-Byte Header (Type $\ge 16$)**: When `type >= 16` and `field < 16`:
+  $$\text{byte}_0 = \text{field}, \quad \text{byte}_1 = \text{type}$$
+* **2-Byte Header (Field $\ge 16$)**: When `type < 16` and `field >= 16`:
+  $$\text{byte}_0 = \text{type} \ll 4, \quad \text{byte}_1 = \text{field}$$
+* **3-Byte Header**: When both `type >= 16` and `field >= 16`:
+  $$\text{byte}_0 = 0x00, \quad \text{byte}_1 = \text{type}, \quad \text{byte}_2 = \text{field}$$
+
+### Header Encoding (`Serializer::addFieldID`)
+
+{{ code('src/libxrpl/protocol/Serializer.cpp', function='Serializer::addFieldID') }}
+
+### Header Decoding (`SerialIter::getFieldID`)
+
+{{ code('src/libxrpl/protocol/Serializer.cpp', function='SerialIter::getFieldID') }}
+
+---
+
+## 2. Variable-Length (VL) Prefix Framing
+
+Variable-length fields (`Blob`, `AccountID`, `Vector256`, `PublicKey`) prefix their payload with length octets:
+
+* **1-Octet ($0 \dots 192$ bytes)**: Length is stored directly as a single byte.
+* **2-Octets ($193 \dots 12480$ bytes)**:
+  $$\text{byte}_0 = 193 + \left\lfloor \frac{\text{len} - 193}{256} \right\rfloor, \quad \text{byte}_1 = (\text{len} - 193) \pmod{256}$$
+* **3-Octets ($12481 \dots 918744$ bytes)**:
+  $$\text{byte}_0 = 241 + \left\lfloor \frac{\text{len} - 12481}{65536} \right\rfloor, \quad \text{byte}_1 \dots \text{byte}_2 = (\text{len} - 12481) \pmod{65536}$$
+
+### VL Prefix Calculation (`Serializer::encodeLengthLength`)
+
+{{ code('src/libxrpl/protocol/Serializer.cpp', function='Serializer::encodeLengthLength') }}
+
+### VL Writing (`Serializer::addVL`)
+
+{{ code('src/libxrpl/protocol/Serializer.cpp', function='Serializer::addVL', signature='Slice const&') }}
+
+### VL Parsing (`SerialIter::getVLDataLength`)
+
+{{ code('src/libxrpl/protocol/Serializer.cpp', function='SerialIter::getVLDataLength') }}
+
+---
+
+## 3. Object and Array Terminators
+
+`ObjectEndMarker` and `ArrayEndMarker` are protocol-definition entries for the
+real nested-scope terminators. They are encoded by the ordinary field-ID
+primitive rather than a separate serializer operation:
+
+* `addFieldID(STI_OBJECT, 1)` combines type 14 and field 1 into `0xE1`.
+* `addFieldID(STI_ARRAY, 1)` combines type 15 and field 1 into `0xF1`.
+
+The object/array implementations append these bytes piecemeal after nested
+payloads. A top-level object has no enclosing field and ends when its input is
+exhausted, so it does not append an end marker for itself.

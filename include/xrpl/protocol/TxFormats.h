@@ -90,6 +90,9 @@ private:
 public:
     static TxFormats const&
     getInstance();
+
+    static std::vector<SOElement> const&
+    getCommonFields();
 };
 
 }  // namespace ripple

@@ -1,0 +1,22 @@
+# `transaction-type` Standalone Wire Specification
+
+The codec maps a canonical transaction format name such as `Payment` to its
+protocol `TxType` and writes that value as exactly two big-endian bytes. Decode
+performs the reverse lookup and rejects unregistered values.
+
+The input is a name, not a decimal type code. Registered values originate in
+`transactions.macro`; reserved/deprecated enum slots that are not loaded into
+`TxFormats` are not silently accepted. There is no field header in the
+standalone payload.
+
+## Name lookup (`KnownFormats::findTypeByName`)
+
+{{ code('include/xrpl/protocol/KnownFormats.h', function='KnownFormats::findTypeByName') }}
+
+## Transaction format registry (`TxFormats::TxFormats`)
+
+{{ code('src/libxrpl/protocol/TxFormats.cpp', function='TxFormats::TxFormats') }}
+
+## Big-endian 16-bit serialization (`Serializer::add16`)
+
+{{ code('src/libxrpl/protocol/Serializer.cpp', function='Serializer::add16') }}

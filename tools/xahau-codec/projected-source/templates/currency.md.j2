@@ -1,0 +1,37 @@
+# `currency` Standalone Wire Specification
+
+The `currency` codec serializes one XRPL `Currency` value without an outer
+field header or VL prefix. The payload is always exactly 20 bytes (160 bits).
+
+## JSON and wire contract
+
+| Input / component | Wire representation | Adversarial note |
+| :--- | :--- | :--- |
+| `"XAH"` or `""` | 20 zero bytes | Native currency is the all-zero `Currency`; decoding normalizes it to the configured system code. The empty string is an accepted encode alias. |
+| Three-character code | Characters at byte offsets 12..14 | Only the protocol's ISO-like character set is accepted. `XAH` is reserved for native currency and is not stored as three ASCII bytes. |
+| 40 hexadecimal characters | The supplied 20 bytes | `noCurrency()` and the protocol's bad-currency sentinel are rejected by JSON encoding. |
+
+Decode requires exactly 20 bytes. In a containing `STObject`, a currency field
+also has its field-ID header; that header is deliberately absent from this
+standalone codec.
+
+The raw `STCurrency(SerialIter&)` constructor accepts any 160-bit value. JSON
+encoding is narrower: it rejects `noCurrency()` and the case variants that
+look like the native system code. Such diagnostic raw values can decode to
+text that is intentionally not re-encodable.
+
+## JSON conversion (`currencyFromJson`)
+
+{{ code('src/libxrpl/protocol/STCurrency.cpp', function='currencyFromJson') }}
+
+## Text/hex conversion (`to_currency`)
+
+{{ code('src/libxrpl/protocol/UintTypes.cpp', function='to_currency', signature='Currency& currency') }}
+
+## Wire deserialization (`STCurrency::STCurrency`)
+
+{{ code('src/libxrpl/protocol/STCurrency.cpp', function='STCurrency::STCurrency', signature='SerialIter& sit') }}
+
+## Wire serialization (`STCurrency::add`)
+
+{{ code('src/libxrpl/protocol/STCurrency.cpp', function='STCurrency::add') }}

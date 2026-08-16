@@ -20,9 +20,11 @@
 #include <xrpl/basics/Log.h>
 #include <xrpl/basics/contract.h>
 #include <xrpl/basics/safe_cast.h>
+#include <xrpl/basics/strHex.h>
 #include <xrpl/beast/core/LexicalCast.h>
 #include <xrpl/protocol/Protocol.h>
 #include <xrpl/protocol/STAmount.h>
+#include <xrpl/protocol/Serializer.h>
 #include <xrpl/protocol/SystemParameters.h>
 #include <xrpl/protocol/UintTypes.h>
 #include <xrpl/protocol/jss.h>
@@ -606,6 +608,58 @@ STAmount::getJson(JsonOptions) const
     Json::Value elem;
     setJson(elem);
     return elem;
+}
+
+Json::Value
+STAmount::getJsonDebug(JsonDebugOptions /*options*/) const
+{
+    Json::Value item(Json::objectValue);
+
+    if (getFName().isUseful())
+    {
+        item["name"] = getFName().getJsonName();
+        Serializer idS;
+        addFieldID(idS);
+        item["header"] = strHex(idS.peekData());
+    }
+
+    Serializer valS;
+    add(valS);
+    item["value"] = strHex(valS.peekData());
+
+    Json::Value parts(Json::objectValue);
+    if (native())
+    {
+        parts["type"] = "native";
+        parts["drops"] = std::to_string(mantissa());
+        parts["negative"] = negative();
+    }
+    else if (mAsset.holds<MPTIssue>())
+    {
+        parts["type"] = "mpt";
+        parts["value"] = std::to_string(mantissa());
+        parts["negative"] = negative();
+        parts["mpt_id"] = to_string(mAsset.get<MPTIssue>().getMptID());
+    }
+    else
+    {
+        parts["type"] = "iou";
+        parts["currency"] = to_string(mAsset.get<Issue>().currency);
+        parts["issuer"] = toBase58(mAsset.get<Issue>().account);
+        if (*this == beast::zero)
+        {
+            parts["zero"] = true;
+        }
+        else
+        {
+            parts["mantissa"] = std::to_string(mantissa());
+            parts["exponent"] = std::to_string(exponent());
+            parts["negative"] = negative();
+        }
+    }
+    item["parts"] = parts;
+
+    return item;
 }
 
 void
