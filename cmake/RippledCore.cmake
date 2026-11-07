@@ -236,15 +236,24 @@ if(xrpld)
           message(STATUS "Hook force recompile enabled (cache bypassed)")
         endif()
         if(HOOKZ_BUILDBOX OR "$ENV{HOOKZ_BUILDBOX}" STREQUAL "1")
-          # Remote evidence must observe the service on every build. An
-          # OUTPUT-cached header may otherwise preserve locally built WASM
+          # hook-buildbox.xrpl.org was retired in October 2026. Fail at
+          # configure rather than build locally under a name that promised
+          # the reference compiler.
+          message(FATAL_ERROR
+            "HOOKZ_BUILDBOX is retired: the buildbox service is gone. "
+            "Set HOOKZ_HOOKS_COMPILER=1 for the reference compiler "
+            "(hookz build-test-hooks --hooks-compiler).")
+        endif()
+        if(HOOKZ_HOOKS_COMPILER OR "$ENV{HOOKZ_HOOKS_COMPILER}" STREQUAL "1")
+          # Reference artifacts must come from hooks-compiler on every build.
+          # An OUTPUT-cached header may otherwise preserve locally built WASM
           # after the compiler mode changes.
-          list(APPEND _hooks_extra_args "--buildbox")
+          list(APPEND _hooks_extra_args "--hooks-compiler")
           if(NOT _hooks_always_run)
             list(APPEND _hooks_extra_args "--force-write")
           endif()
           set(_hooks_always_run ON)
-          message(STATUS "Canonical buildbox enabled (always recompiled)")
+          message(STATUS "Reference hooks-compiler enabled (always recompiled)")
         endif()
 
         # Run hookz build-test-hooks on each test file before compilation
