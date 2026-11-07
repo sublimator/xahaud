@@ -591,6 +591,134 @@ public:
     }
 
     void
+    test_emitted_txn_entry(FeatureBitset features)
+    {
+        testcase("Test emitted txn ledger entry");
+
+        using namespace jtx;
+        using namespace hook;
+        using namespace hook_api;
+
+        auto const alice = Account{"alice"};
+
+        for (bool const withFix : {true, false})
+        {
+            Env env{*this, withFix ? features : features - fix20261005};
+
+            // emissions are only written into non-open views, so apply on
+            // top of the last closed ledger the way consensus does
+            auto const closed = env.closed();
+            OpenView ov{&*closed};
+            BEAST_EXPECT(!ov.open());
+
+            STTx const invokeTx = STTx(ttINVOKE, [&](STObject& obj) {});
+            ApplyContext applyCtx{
+                env.app(),
+                ov,
+                invokeTx,
+                tesSUCCESS,
+                env.current()->fees().base,
+                tapNONE,
+                env.journal};
+
+            STTx const emitTx = STTx(ttINVOKE, [&](STObject& obj) {
+                obj[sfAccount] = alice.id();
+                obj[sfSequence] = 0;
+                obj[sfSigningPubKey] = Slice{};
+                obj[sfFirstLedgerSequence] = closed->seq() + 1;
+                obj[sfLastLedgerSequence] = closed->seq() + 5;
+                obj[sfFee] = closed->fees().base;
+
+                auto& emitDetails = obj.peekFieldObject(sfEmitDetails);
+                emitDetails[sfEmitGeneration] = 1;
+                emitDetails[sfEmitBurden] = 1;
+                emitDetails[sfEmitParentTxnID] = invokeTx.getTransactionID();
+                emitDetails[sfEmitNonce] = uint256();
+                emitDetails[sfEmitHookHash] = uint256();
+            });
+
+            std::string reason;
+            auto const emitted = std::make_shared<ripple::Transaction>(
+                std::make_shared<STTx const>(emitTx), reason, env.app());
+            std::queue<std::shared_ptr<ripple::Transaction>> emittedTxn;
+            emittedTxn.push(emitted);
+
+            auto hookCtx = makeStubHookContext(
+                applyCtx,
+                alice.id(),
+                alice.id(),
+                {.result = {.emittedTxn = emittedTxn}});
+
+            BEAST_EXPECT(
+                hook::finalizeHookResult(hookCtx.result, applyCtx, true) ==
+                tesSUCCESS);
+
+            auto const kl = keylet::emittedTxn(emitted->getID());
+            auto const sle = applyCtx.view().peek(kl);
+            if (!BEAST_EXPECT(sle))
+                continue;
+
+            Serializer expected;
+            emitTx.add(expected);
+
+            // in memory: with the fix sfEmittedTxn occupies its template
+            // slot exactly once, without it a duplicate is appended behind
+            // the (non-present) template slot and the field reads absent
+            auto const entries =
+                std::count_if(sle->begin(), sle->end(), [](STBase const& f) {
+                    return f.getFName() == sfEmittedTxn;
+                });
+            BEAST_EXPECT(entries == (withFix ? 1 : 2));
+            BEAST_EXPECT(sle->isFieldPresent(sfEmittedTxn) == withFix);
+
+            // serialized: identical either way, re-reading the entry always
+            // yields exactly the emitted transaction
+            {
+                Serializer s;
+                sle->add(s);
+                SerialIter sit(s.slice());
+                STLedgerEntry const reread(sit, kl.key);
+                BEAST_EXPECT(reread.isFieldPresent(sfEmittedTxn));
+                Serializer txn;
+                reread.peekAtField(sfEmittedTxn).add(txn);
+                BEAST_EXPECT(txn.peekData() == expected.peekData());
+            }
+
+            // a hook running later in the same ledger can tell them apart:
+            // slot_subfield only finds sfEmittedTxn with the fix
+            auto readerCtx =
+                makeStubHookContext(applyCtx, alice.id(), alice.id(), {});
+            auto& api = readerCtx.api();
+
+            Bytes klBytes{
+                static_cast<uint8_t>((kl.type >> 8) & 0xFFU),
+                static_cast<uint8_t>(kl.type & 0xFFU)};
+            klBytes.insert(klBytes.end(), kl.key.begin(), kl.key.end());
+
+            auto const slotNo = api.slot_set(klBytes, 0);
+            if (!BEAST_EXPECT(slotNo.has_value()))
+                continue;
+
+            auto const sub =
+                api.slot_subfield(slotNo.value(), sfEmittedTxn.getCode(), 0);
+            if (!withFix)
+            {
+                BEAST_EXPECT(!sub.has_value() && sub.error() == DOESNT_EXIST);
+                continue;
+            }
+
+            if (!BEAST_EXPECT(sub.has_value()))
+                continue;
+            auto const field = api.slot(sub.value());
+            if (!BEAST_EXPECT(field.has_value()))
+                continue;
+            Serializer s;
+            field.value()->add(s);
+            BEAST_EXPECT(s.peekData() == expected.peekData());
+        }
+    }
+
+    void
     test_etxn_details(FeatureBitset features)
     {
         testcase("Test etxn_details");
@@ -731,6 +859,56 @@ public:
                 BEAST_EXPECT(result.value() == baseFee + blobSize + memoSize);
             else
                 BEAST_EXPECT(result.value() == baseFee + memoSize);
+        }
+        {
+            // fix20260929: the minimum fee is computed against the view
+            // being applied, not the node-local open ledger. Simulate that
+            // by inserting a hook definition (with a callback fee) into
+            // applyCtx.view() only -- it is never inserted into the open
+            // ledger the node otherwise reads.
+            uint256 const hookHash{1};
+
+            STTx const emittedTx = STTx(ttINVOKE, [&](STObject& obj) {
+                obj[sfAccount] = alice.id();
+                obj[sfSequence] = 0;
+                obj[sfSigningPubKey] = Slice{};
+                obj[sfFirstLedgerSequence] = ov.seq() + 1;
+                obj[sfLastLedgerSequence] = ov.seq() + 5;
+                obj[sfFee] = env.closed()->fees().base;
+
+                auto& emitDetails = obj.peekFieldObject(sfEmitDetails);
+                emitDetails[sfEmitGeneration] = 1;
+                emitDetails[sfEmitBurden] = 1;
+                emitDetails[sfEmitParentTxnID] = invokeTx.getTransactionID();
+                emitDetails[sfEmitNonce] = uint256();
+                emitDetails[sfEmitHookHash] = hookHash;
+            });
+            Serializer const emittedTxSerializer = emittedTx.getSerializer();
+
+            auto const baseline =
+                api.etxn_fee_base(emittedTxSerializer.slice());
+            BEAST_EXPECT(baseline.has_value());
+
+            auto hookDef =
+                std::make_shared<SLE>(keylet::hookDefinition(hookHash));
+            hookDef->setFieldH256(sfHookHash, hookHash);
+            hookDef->setFieldH256(sfHookNamespace, uint256());
+            hookDef->setFieldArray(sfHookParameters, STArray{});
+            hookDef->setFieldU16(sfHookApiVersion, 0);
+            hookDef->setFieldVL(sfCreateCode, std::vector<uint8_t>{});
+            hookDef->setFieldH256(sfHookSetTxnID, invokeTx.getTransactionID());
+            hookDef->setFieldU64(sfReferenceCount, 1);
+            hookDef->setFieldAmount(sfFee, XRPAmount{0});
+            hookDef->setFieldAmount(sfHookCallbackFee, XRPAmount{12345});
+            applyCtx.view().insert(hookDef);
+
+            auto const result = api.etxn_fee_base(emittedTxSerializer.slice());
+            BEAST_EXPECT(result.has_value());
+
+            if (env.closed()->rules().enabled(fix20260929))
+                BEAST_EXPECT(result.value() == baseline.value() + 12345);
+            else
+                BEAST_EXPECT(result.value() == baseline.value());
         }
     }
 
@@ -1778,11 +1956,31 @@ public:
         BEAST_EXPECT(api.float_set(-50, 0).value() == 0);
         BEAST_EXPECT(api.float_set(0, 0).value() == 0);
 
-        // an exponent lower than -96 should produce an invalid float error
-        BEAST_EXPECT(api.float_set(-97, 1).error() == INVALID_FLOAT);
+        // fix20261005: exponent out of range is reported as
+        // EXPONENT_UNDERSIZED / EXPONENT_OVERSIZED; before the fix both
+        // cases were reported as INVALID_FLOAT
+        bool const fixExpCodes = env.current()->rules().enabled(fix20261005);
+        auto const undersized =
+            fixExpCodes ? EXPONENT_UNDERSIZED : INVALID_FLOAT;
+        auto const oversized = fixExpCodes ? EXPONENT_OVERSIZED : INVALID_FLOAT;
 
-        // an exponent larger than +96 should produce an invalid float error
-        BEAST_EXPECT(api.float_set(+97, 1).error() == INVALID_FLOAT);
+        // an exponent lower than -96 should produce an underflow error
+        BEAST_EXPECT(api.float_set(-97, 1).error() == undersized);
+
+        // an exponent larger than +96 should produce an overflow error
+        BEAST_EXPECT(api.float_set(+97, 1).error() == oversized);
+
+        // the -96..80 range applies to the exponent after the mantissa has
+        // been normalized to 16 digits (1 -> 1e15, exponent - 15)
+        auto const oneE15 = [](int32_t exp) {
+            return hook::hook_float::make_float(1000000000000000ULL, exp, false)
+                .value();
+        };
+        BEAST_EXPECT(api.float_set(81, 1).value() == oneE15(66));
+        BEAST_EXPECT(api.float_set(95, 1).value() == oneE15(80));
+        BEAST_EXPECT(api.float_set(96, 1).error() == oversized);
+        BEAST_EXPECT(api.float_set(-81, 1).value() == oneE15(-96));
+        BEAST_EXPECT(api.float_set(-82, 1).error() == undersized);
 
         // clang-format off
         std::vector<std::tuple<int32_t, int64_t, uint64_t>> tests = {
@@ -2172,22 +2370,19 @@ public:
             BEAST_EXPECT(api.hook_param(Bytes(33, 1)).error() == TOO_BIG);
         }
 
-        // {
-        //     // Hook params map
-        //     Bytes const name{'k'};
-        //     Bytes const value{1, 2, 3};
-        //     StubHookContext stubCtx{
-        //         .result = {
-        //             .hookParams = {{{name, value}}},
-        //         }};
-        //     auto hookCtx =
-        //         makeStubHookContext(applyCtx, alice.id(), alice.id(),
-        //         stubCtx);
-        //     hook::HookAPI api(hookCtx);
-        //     auto const result = api.hook_param(name);
-        //     BEAST_EXPECT(result.has_value());
-        //     BEAST_EXPECT(result.value() == value);
-        // }
+        {
+            // Hook params map
+            Bytes const name{'k'};
+            Bytes const value{1, 2, 3};
+            StubHookContext stubCtx{};
+            stubCtx.result.hookParams = std::map<Bytes, Bytes>{{name, value}};
+            auto hookCtx =
+                makeStubHookContext(applyCtx, alice.id(), alice.id(), stubCtx);
+            auto& api = hookCtx.api();
+            auto const result = api.hook_param(name);
+            BEAST_EXPECT(result.has_value());
+            BEAST_EXPECT(result.value() == value);
+        }
 
         {
             // Override deletion wins
@@ -2849,6 +3044,91 @@ public:
     }
 
     void
+    test_otxn_field_emit_failure(FeatureBitset features)
+    {
+        testcase("Test otxn_field on emit failure callback");
+
+        using namespace jtx;
+        using namespace hook_api;
+
+        auto const alice = Account{"alice"};
+        auto const bob = Account{"bob"};
+
+        // the cleanup pseudo carries sfLedgerSequence / sfTransactionHash,
+        // the original emitted txn carries sfDestination
+        STTx const pseudo = STTx(ttEMIT_FAILURE, [&](STObject& obj) {
+            obj.setFieldU32(sfLedgerSequence, 1);
+            obj.setFieldH256(sfTransactionHash, uint256{5});
+        });
+        STTx const emitted = STTx(ttPAYMENT, [&](STObject& obj) {
+            obj[sfAccount] = alice.id();
+            obj[sfDestination] = bob.id();
+        });
+
+        for (bool const withFix : {false, true})
+        {
+            Env env{
+                *this,
+                withFix ? features | fix20261005 : features - fix20261005};
+            OpenView ov{*env.current()};
+            ApplyContext applyCtx = createApplyContext(env, ov, pseudo);
+            StubHookContext stubCtx{.emitFailure = emitted};
+            auto hookCtx =
+                makeStubHookContext(applyCtx, alice.id(), alice.id(), stubCtx);
+            auto& api = hookCtx.api();
+
+            // present on both: read from the emitted txn either way
+            {
+                auto const result = api.otxn_field(sfAccount.getCode());
+                BEAST_EXPECT(result.has_value());
+                auto const* acct =
+                    dynamic_cast<STAccount const*>(result.value());
+                BEAST_EXPECT(acct && acct->value() == alice.id());
+            }
+
+            // only on the emitted txn: before the fix presence was checked
+            // on the pseudo, so the field was reported missing
+            {
+                auto const result = api.otxn_field(sfDestination.getCode());
+                if (withFix)
+                {
+                    BEAST_EXPECT(result.has_value());
+                    auto const* dest =
+                        dynamic_cast<STAccount const*>(result.value());
+                    BEAST_EXPECT(dest && dest->value() == bob.id());
+                }
+                else
+                {
+                    BEAST_EXPECT(
+                        !result.has_value() && result.error() == DOESNT_EXIST);
+                }
+            }
+
+            // only on the pseudo: before the fix this throws out of
+            // getField on the emitted txn
+            if (withFix)
+            {
+                auto const result = api.otxn_field(sfLedgerSequence.getCode());
+                BEAST_EXPECT(
+                    !result.has_value() && result.error() == DOESNT_EXIST);
+            }
+            else
+            {
+                bool threw = false;
+                try
+                {
+                    (void)api.otxn_field(sfLedgerSequence.getCode());
+                }
+                catch (std::exception const&)
+                {
+                    threw = true;
+                }
+                BEAST_EXPECT(threw);
+            }
+        }
+    }
+
+    void
     test_otxn_id(FeatureBitset features)
     {
         testcase("Test otxn_id");
@@ -3234,21 +3514,30 @@ public:
         using namespace hook_api;
 
         auto const alice = Account{"alice"};
-        Env env{*this, features};
-        STTx invokeTx = STTx(ttINVOKE, [&](STObject& obj) {});
-        OpenView ov{*env.current()};
-        ApplyContext applyCtx = createApplyContext(env, ov, invokeTx);
-        auto hookCtx =
-            makeStubHookContext(applyCtx, alice.id(), alice.id(), {});
-        auto& api = hookCtx.api();
+        for (bool const withFix : {true, false})
+        {
+            Env env{*this, withFix ? features : features - fix20261005};
+            STTx invokeTx = STTx(ttINVOKE, [&](STObject& obj) {});
+            OpenView ov{*env.current()};
+            ApplyContext applyCtx = createApplyContext(env, ov, invokeTx);
+            auto hookCtx =
+                makeStubHookContext(applyCtx, alice.id(), alice.id(), {});
+            auto& api = hookCtx.api();
 
-        // Invalid argument (wrong size)
-        BEAST_EXPECT(
-            api.slot_set(Bytes{1, 2, 3}, 0).error() == INVALID_ARGUMENT);
-        // Invalid argument (slot_no beyond max)
-        BEAST_EXPECT(
-            api.slot_set(Bytes(32, 0), hook_api::max_slots + 1).error() ==
-            INVALID_ARGUMENT);
+            // Invalid argument (wrong size)
+            BEAST_EXPECT(
+                api.slot_set(Bytes{1, 2, 3}, 0).error() == INVALID_ARGUMENT);
+            // Invalid argument (slot_no beyond max)
+            BEAST_EXPECT(
+                api.slot_set(Bytes(32, 0), hook_api::max_slots + 1).error() ==
+                INVALID_ARGUMENT);
+
+            // 32-byte txn hash: rejected with fix20261005, looked up (and
+            // not found here) without it
+            BEAST_EXPECT(
+                api.slot_set(Bytes(32, 0), 1).error() ==
+                (withFix ? INVALID_ARGUMENT : DOESNT_EXIST));
+        }
     }
 
     void
@@ -3534,6 +3823,174 @@ public:
             auto const result = api.state_foreign(testKey, testNs, alice.id());
             BEAST_EXPECT(!result.has_value());
             BEAST_EXPECT(result.error() == DOESNT_EXIST);
+        }
+    }
+
+    void
+    test_state_foreign_read_accounting(FeatureBitset features)
+    {
+        testcase("Test state_foreign read does not consume write resources");
+
+        using namespace jtx;
+        using namespace hook_api;
+        using namespace hook;
+
+        bool const hasFix = features[fix20261005];
+        bool const hasExtended = features[featureExtendedHookState];
+
+        Env env{*this, features};
+
+        auto const fees = env.current()->fees();
+        auto const alice = Account{"alice"};
+        auto const bob = Account{"bob"};
+        auto const carol = Account{"carol"};
+        env.fund(XRP(10000), alice);
+        // exactly one state reserve slot available
+        env.fund(fees.accountReserve(0) + fees.increment, bob);
+        // no state reserve slot available
+        env.fund(fees.accountReserve(0), carol);
+        env.close();
+
+        uint256 const readKey{1};
+        uint256 const writeKey{2};
+        uint256 const ns{3};
+        Bytes const existingData{0xAA, 0xBB};
+        Bytes writeData{0x01};
+
+        OpenView ov{*env.current()};
+
+        // Place an existing state entry (and its namespace directory) on
+        // ledger for each account, so state_foreign's cache-miss path reads it.
+        auto insertState = [&](AccountID const& acc) {
+            auto const dirKeylet = keylet::hookStateDir(acc, ns);
+            auto dir = std::make_shared<SLE>(dirKeylet);
+            dir->setFieldH256(sfRootIndex, dirKeylet.key);
+            dir->setFieldV256(
+                sfIndexes,
+                STVector256{std::vector<uint256>{
+                    keylet::hookState(acc, readKey, ns).key}});
+            ov.rawInsert(dir);
+
+            auto hs =
+                std::make_shared<SLE>(keylet::hookState(acc, readKey, ns));
+            hs->setFieldVL(sfHookStateData, existingData);
+            hs->setFieldH256(sfHookStateKey, readKey);
+            hs->setFieldU64(sfOwnerNode, 0);
+            ov.rawInsert(hs);
+        };
+        insertState(alice.id());
+        insertState(bob.id());
+        insertState(carol.id());
+
+        STTx invokeTx = STTx(ttINVOKE, [&](STObject& obj) {});
+        ApplyContext applyCtx = createApplyContext(env, ov, invokeTx);
+
+        auto availableSlots = [&](AccountID const& acc) -> int64_t {
+            auto const sle = ov.read(keylet::account(acc));
+            int64_t avail = sle->getFieldAmount(sfBalance).xrp().drops() -
+                fees.accountReserve(sle->getFieldU32(sfOwnerCount)).drops();
+            return avail / fees.increment.drops();
+        };
+
+        {
+            // A read must not consume the shared modification limit.
+            HookStateMap stateMap;
+            auto hookCtx = makeStubHookContext(
+                applyCtx, alice.id(), alice.id(), {}, stateMap);
+            auto& api = hookCtx.api();
+
+            stateMap.modified_entry_count = max_state_modifications - 1;
+
+            auto const read = api.state_foreign(readKey, ns, alice.id());
+            BEAST_EXPECT(read.has_value() && read.value() == existingData);
+
+            int64_t const slots = availableSlots(alice.id());
+            BEAST_EXPECT(slots > 1);
+            BEAST_EXPECT(
+                stateMap.modified_entry_count ==
+                max_state_modifications - (hasFix ? 1 : 0));
+            BEAST_EXPECT(
+                std::get<0>(stateMap[alice.id()]) == slots - (hasFix ? 0 : 1));
+
+            auto const write =
+                api.state_foreign_set(writeKey, ns, alice.id(), writeData);
+            if (hasFix)
+            {
+                BEAST_EXPECT(write.has_value());
+                BEAST_EXPECT(
+                    stateMap.modified_entry_count == max_state_modifications);
+            }
+            else
+            {
+                BEAST_EXPECT(!write.has_value());
+                BEAST_EXPECT(write.error() == TOO_MANY_STATE_MODIFICATIONS);
+            }
+        }
+
+        {
+            // A read must not consume the reserve budget.
+            HookStateMap stateMap;
+            auto hookCtx =
+                makeStubHookContext(applyCtx, bob.id(), bob.id(), {}, stateMap);
+            auto& api = hookCtx.api();
+
+            BEAST_EXPECT(availableSlots(bob.id()) == 1);
+
+            auto const read = api.state_foreign(readKey, ns, bob.id());
+            BEAST_EXPECT(read.has_value() && read.value() == existingData);
+            BEAST_EXPECT(std::get<0>(stateMap[bob.id()]) == (hasFix ? 1 : 0));
+
+            auto const write =
+                api.state_foreign_set(writeKey, ns, bob.id(), writeData);
+            if (hasFix)
+            {
+                BEAST_EXPECT(write.has_value());
+                BEAST_EXPECT(std::get<0>(stateMap[bob.id()]) == 0);
+            }
+            else
+            {
+                BEAST_EXPECT(!write.has_value());
+                BEAST_EXPECT(write.error() == RESERVE_INSUFFICIENT);
+            }
+
+            // Modifying the entry that was read needs no new reserve and
+            // is still charged as a modification.
+            auto const before = stateMap.modified_entry_count;
+            Bytes overwrite{0x02};
+            auto const update =
+                api.state_foreign_set(readKey, ns, bob.id(), overwrite);
+            BEAST_EXPECT(update.has_value());
+            BEAST_EXPECT(stateMap.modified_entry_count == before + 1);
+        }
+
+        {
+            // A read on an account with no spare reserve must succeed;
+            // previously ExtendedHookState's sanity check rejected it.
+            HookStateMap stateMap;
+            auto hookCtx = makeStubHookContext(
+                applyCtx, carol.id(), carol.id(), {}, stateMap);
+            auto& api = hookCtx.api();
+
+            BEAST_EXPECT(availableSlots(carol.id()) == 0);
+
+            auto const read = api.state_foreign(readKey, ns, carol.id());
+            if (hasExtended && !hasFix)
+            {
+                BEAST_EXPECT(!read.has_value());
+                BEAST_EXPECT(read.error() == INTERNAL_ERROR);
+            }
+            else
+            {
+                BEAST_EXPECT(read.has_value() && read.value() == existingData);
+                BEAST_EXPECT(stateMap.modified_entry_count == (hasFix ? 0 : 1));
+            }
+
+            // Writing a new key still fails on reserve either way.
+            auto const write =
+                api.state_foreign_set(writeKey, ns, carol.id(), writeData);
+            BEAST_EXPECT(!write.has_value());
+            if (!write.has_value())
+                BEAST_EXPECT(write.error() == RESERVE_INSUFFICIENT);
         }
     }
 
@@ -3941,310 +4398,142 @@ public:
 
         auto const _source_object =
             *strUnHex("81140000000000000000000000000000000000000000");
+
+        std::vector<std::pair<uint32_t, std::string>> data_list = {
+            {// UINT16 Version
+             sfVersion.getCode(),
+             "10100001"},
+            {// UINT32 Sequence
+             sfSequence.getCode(),
+             "2400000001"},
+            // UINT64
+            {// Uint64 ExchangeRate
+             sfExchangeRate.getCode(),
+             "360000000000000001"},
+            {// UINT256 EmailHash
+             sfEmailHash.getCode(),
+             "4100000000000000000000000000000000"},
+            {// UINT256 ObjectID
+             sfObjectID.getCode(),
+             "5E000000000000000000000000000000000000000000000000000000000000000"
+             "0"},
+            {// Amount NativeAmount
+             sfAmount.getCode(),
+             "61999999999999999999999999999999999999999999999999999999999999999"
+             "999999999999999999999999999999999"},
+            {// Amount IOUAmount
+             sfAmount.getCode(),
+             "614999999999999999"},
+            {// Object AmountEntry
+             sfAmountEntry.getCode(),
+             "E05B614000000000000064E1"},
+            {// Array Memos
+             sfMemos.getCode(),
+             "F9EA7D04DEADBEEFE1F1"},
+            {// UINT8 TickSize
+             sfTickSize.getCode(),
+             "00101001"},
+            {// UINT160 TakerPaysCurrency
+             sfTakerPaysCurrency.getCode(),
+             "01110000000000000000000000005553440000000000"},
+            {// PathSet Paths
+             sfPaths.getCode(),
+             "0112300000000000000000000000005553440000000000054F6F784A58F9EFB0A"
+             "9EB90B83464F9D166461900"},
+            {// Vector256 Amendments
+             sfAmendments.getCode(),
+             "03132042426C4D4F1009EE67080A9B7965B44656D7714D104A72F9B4369F97ABF"
+             "044EE"},
+            {// Issue ClaimCurrency
+             sfClaimCurrency.getCode(),
+             "05180000000000000000000000005553440000000000054F6F784A58F9EFB0A9E"
+             "B90B83464F9D1664619"},
+            {// XChainBridge Native-Native
+             sfXChainBridge.getCode(),
+             "011914AE123A8556F3CF91154711376AFB0F894F832B3D000000000000"
+             "000000000000000000000000000014AE123A8556F3CF91154711376AFB"
+             "0F894F832B3D0000000000000000000000000000000000000000"},
+            {// Currency BaseAsset
+             sfBaseAsset.getCode(),
+             "011A0000000000000000000000005553440000000000"},
+        };
+        if (env.closed()->rules().enabled(fix20260929))
         {
-            // use UINT16
+            // encodings the legacy parser measures incorrectly
+            data_list.insert(
+                data_list.end(),
+                {
+                    // MPT is not supported yet
+                    // {// Issue ClaimCurrency MPT
+                    //  sfClaimCurrency.getCode(),
+                    //  "0518AE123A8556F3CF91154711376AFB0F894F832B3D0000000000"
+                    //  "00000000000000000000000000000100000001"},
+                    {// XChainBridge default door + IOU, Native
+                     sfXChainBridge.getCode(),
+                     "0119000000000000000000000000005553440000000000AE123A85"
+                     "56F3CF91154711376AFB0F894F832B3D14AE123A8556F3CF911547"
+                     "11376AFB0F894F832B3D00000000000000000000000000000000000"
+                     "00000"},
+                });
+        }
+        bool const fixEnabled = env.closed()->rules().enabled(fix20260929);
+        for (auto const& data : data_list)
+        {
             auto source_object = _source_object;
-            auto field_object = *strUnHex("10100001");
-            // Version: 1
+            auto field_object = *strUnHex(data.second);
+            auto field_id = data.first;
 
-            auto const result = api.sto_emplace(
-                source_object, field_object, sfVersion.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            field_object.insert(
-                field_object.end(), source_object.begin(), source_object.end());
-            BEAST_EXPECT(result.value() == field_object);
+            // test invalid insert: trailing byte after the field
+            auto ft = field_object;
+            ft.push_back(0);
+            auto const result3 = api.sto_emplace(source_object, ft, field_id);
+            // legacy parser ignores trailing bytes in the field
+            if (fixEnabled)
+                BEAST_EXPECTS(!result3.has_value(), data.second);
+            else
+                BEAST_EXPECTS(result3.has_value(), data.second);
 
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfVersion.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
+            // truncated field / source are only exercised after the fix;
+            // the legacy parser may read past the end of these buffers
+            if (!fixEnabled)
+                continue;
+
+            auto const fo = Blob{field_object.begin(), field_object.end() - 1};
+            auto const result1 = api.sto_emplace(source_object, fo, field_id);
+            BEAST_EXPECTS(!result1.has_value(), data.second);
+
+            auto const so =
+                Blob{source_object.begin(), source_object.end() - 1};
+            auto const result2 = api.sto_emplace(so, field_object, field_id);
+            BEAST_EXPECTS(!result2.has_value(), data.second);
         }
 
+        for (auto const& data : data_list)
         {
-            // use UINT32
             auto source_object = _source_object;
-            auto field_object = *strUnHex("2400000001");
-            // Sequence: 1
-
-            auto const result = api.sto_emplace(
-                source_object, field_object, sfSequence.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            field_object.insert(
-                field_object.end(), source_object.begin(), source_object.end());
-            BEAST_EXPECT(result.value() == field_object);
-
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfSequence.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // use UINT64
-            auto source_object = _source_object;
-            auto field_object = *strUnHex("360000000000000001");
-            // ExchangeRate: 1
-
-            auto const result = api.sto_emplace(
-                source_object, field_object, sfExchangeRate.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            field_object.insert(
-                field_object.end(), source_object.begin(), source_object.end());
-            BEAST_EXPECT(result.value() == field_object);
-
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfExchangeRate.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // use UINT128
-            auto source_object = _source_object;
-            auto field_object = *strUnHex("4100000000000000000000000000000000");
-            // EmailHash: 1
-
-            auto const result = api.sto_emplace(
-                source_object, field_object, sfEmailHash.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            field_object.insert(
-                field_object.end(), source_object.begin(), source_object.end());
-            BEAST_EXPECT(result.value() == field_object);
-
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfEmailHash.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // use UINT256
-            auto source_object = _source_object;
-            auto field_object = *strUnHex(
-                "5E000000000000000000000000000000000000000000000000000000000000"
-                "0000");
-            // ObjectID:
-            // "0000000000000000000000000000000000000000000000000000000000000000"
-
-            auto const result = api.sto_emplace(
-                source_object, field_object, sfObjectID.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            field_object.insert(
-                field_object.end(), source_object.begin(), source_object.end());
-            BEAST_EXPECT(result.value() == field_object);
-
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfObjectID.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // use AMOUNT
-            auto source_object = _source_object;
-
-            auto nativeamount = *strUnHex(
-                "61999999999999999999999999999999999999999999999999999999999999"
-                "999999999999999999999999999999999999");
-            auto iouamount = *strUnHex("614999999999999999");
-
-            for (auto field_object : {nativeamount, iouamount})
-            {
-                auto const result = api.sto_emplace(
-                    source_object, field_object, sfAmount.getCode());
-                BEAST_EXPECT(result.has_value());
-                BEAST_EXPECT(
-                    result.value().size() ==
-                    source_object.size() + field_object.size());
-                field_object.insert(
-                    field_object.end(),
-                    source_object.begin(),
-                    source_object.end());
-                BEAST_EXPECT(result.value() == field_object);
-
-                auto const erase_result = api.sto_emplace(
-                    result.value(), std::nullopt, sfAmount.getCode());
-                BEAST_EXPECT(erase_result.has_value());
-                BEAST_EXPECT(
-                    erase_result.value().size() == _source_object.size());
-                BEAST_EXPECT(erase_result.value() == _source_object);
-            }
-        }
-
-        {
-            // OBJECT
-            auto source_object = _source_object;
-            auto field_object = *strUnHex("E05B614000000000000064E1");
-            // {"AmountEntry": {"Amount": "100"}}
-
-            auto const result = api.sto_emplace(
-                source_object, field_object, sfAmountEntry.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            source_object.insert(
-                source_object.end(), field_object.begin(), field_object.end());
-            BEAST_EXPECT(result.value() == source_object);
-
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfAmountEntry.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // ARRAY
-            auto source_object = _source_object;
-            auto field_object = *strUnHex("F9EA7D04DEADBEEFE1F1");
-            // {"Memos": [{"Memo":{ "MemoData": "DEADBEEF" }}]}
+            auto field_object = *strUnHex(data.second);
+            auto field_id = data.first;
 
             auto const result =
-                api.sto_emplace(source_object, field_object, sfMemos.getCode());
-            BEAST_EXPECT(result.has_value());
+                api.sto_emplace(source_object, field_object, field_id);
+            BEAST_EXPECTS(result.has_value(), data.second);
+            auto const r = result.value();
             BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            source_object.insert(
-                source_object.end(), field_object.begin(), field_object.end());
-            BEAST_EXPECT(result.value() == source_object);
+                r.size() == source_object.size() + field_object.size());
+            field_object.insert(
+                field_id < sfAccount.getCode() ? field_object.end()
+                                               : field_object.begin(),
+                source_object.begin(),
+                source_object.end());
+            BEAST_EXPECT(r == field_object);
 
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfMemos.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // UINT8
-            auto source_object = _source_object;
-            auto field_object = *strUnHex("00101001");
-            // {"TickSize": 1}
-
-            auto const result = api.sto_emplace(
-                source_object, field_object, sfTickSize.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            source_object.insert(
-                source_object.end(), field_object.begin(), field_object.end());
-            BEAST_EXPECT(result.value() == source_object);
-
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfTickSize.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // UINT160
-            auto source_object = _source_object;
-            auto field_object =
-                *strUnHex("01110000000000000000000000005553440000000000");
-            // {"TakerPaysCurrency": "0000000000000000000000005553440000000000"}
-
-            auto const result = api.sto_emplace(
-                source_object, field_object, sfTakerPaysCurrency.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            source_object.insert(
-                source_object.end(), field_object.begin(), field_object.end());
-            BEAST_EXPECT(result.value() == source_object);
-
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfTakerPaysCurrency.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // PATHSET
-            auto source_object = _source_object;
-            auto field_object = *strUnHex(
-                "0112300000000000000000000000005553440000000000054F6F784A58F9EF"
-                "B0A9EB90B83464F9D166461900");
-            // {"Paths": [[{ "currency": "USD", "issuer":
-            // "rVnYNK9yuxBz4uP8zC8LEFokM2nqH3poc" }]]}
-
-            auto const result =
-                api.sto_emplace(source_object, field_object, sfPaths.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            source_object.insert(
-                source_object.end(), field_object.begin(), field_object.end());
-            BEAST_EXPECT(result.value() == source_object);
-
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfPaths.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // VECTOR256
-            auto source_object = _source_object;
-            auto field_object = *strUnHex(
-                "03132042426C4D4F1009EE67080A9B7965B44656D7714D104A72F9B4369F97"
-                "ABF044EE");
-            // {"Amendments":["42426C4D4F1009EE67080A9B7965B44656D7714D104A72F9B4369F97ABF044EE"]}
-
-            auto const result = api.sto_emplace(
-                source_object, field_object, sfAmendments.getCode());
-            BEAST_EXPECT(result.has_value());
-            BEAST_EXPECT(
-                result.value().size() ==
-                source_object.size() + field_object.size());
-            source_object.insert(
-                source_object.end(), field_object.begin(), field_object.end());
-            BEAST_EXPECT(result.value() == source_object);
-
-            auto const erase_result = api.sto_emplace(
-                result.value(), std::nullopt, sfAmendments.getCode());
-            BEAST_EXPECT(erase_result.has_value());
-            BEAST_EXPECT(erase_result.value().size() == _source_object.size());
-            BEAST_EXPECT(erase_result.value() == _source_object);
-        }
-
-        {
-            // UINT96
-        }
-
-        {
-            // UINT384
-        }
-
-        {
-            // UINT512
+            // test erase
+            auto const erase_result =
+                api.sto_emplace(result.value(), std::nullopt, field_id);
+            BEAST_EXPECTS(erase_result.has_value(), data.second);
+            auto const er = erase_result.value();
+            BEAST_EXPECT(er.size() == _source_object.size());
+            BEAST_EXPECT(er == _source_object);
         }
     }
 
@@ -4281,6 +4570,38 @@ public:
             BEAST_EXPECT(
                 api.sto_subarray(Bytes{0xF0, 0x5C, 0xF1}, 0).error() ==
                 PARSE_ERROR);
+        }
+
+        {
+            // Invalid: wrapped array has an invalid end marker.
+            // should be "F9EA7D02BEEFE1F1" {Memos:[{Memo:{MemoData:"BEEF"}}]}
+            auto const invalid_end_marker = *strUnHex("F9EA7D02BEEFE100");
+            auto const result = api.sto_subarray(invalid_end_marker, 0);
+            if (env.closed()->rules().enabled(fix20260929))
+            {
+                BEAST_EXPECT(!result.has_value());
+                BEAST_EXPECT(result.error() == PARSE_ERROR);
+            }
+            else
+            {
+                BEAST_EXPECT(result.value() == std::make_pair(1u, 6u));
+            }
+        }
+
+        {
+            // Invalid: the first element is valid but a following element is
+            // truncated.
+            auto const invalid_tail = *strUnHex("F9EA7D02BEEFE1EA7D02BEEFF1");
+            auto const result = api.sto_subarray(invalid_tail, 0);
+            if (env.closed()->rules().enabled(fix20260929))
+            {
+                BEAST_EXPECT(!result.has_value());
+                BEAST_EXPECT(result.error() == PARSE_ERROR);
+            }
+            else
+            {
+                BEAST_EXPECT(result.value() == std::make_pair(1u, 6u));
+            }
         }
 
         {
@@ -4339,6 +4660,25 @@ public:
         }
 
         {
+            // Invalid: the requested field is valid but a later field is
+            // truncated.
+            auto const data = *strUnHex(
+                "240000000181140000000000000000000000000000000000000000");
+            auto const invalid_tail = Blob{data.begin(), data.end() - 1};
+            auto const result =
+                api.sto_subfield(invalid_tail, sfSequence.getCode());
+            if (env.closed()->rules().enabled(fix20260929))
+            {
+                BEAST_EXPECT(!result.has_value());
+                BEAST_EXPECT(result.error() == PARSE_ERROR);
+            }
+            else
+            {
+                BEAST_EXPECT(result.value() == std::make_pair(1u, 4u));
+            }
+        }
+
+        {
             // doesn't found
             // { Memo: {MemoData: "BEEF"} }
             auto const memos = *strUnHex("EA7D02BEEFE1");
@@ -4385,8 +4725,20 @@ public:
             makeStubHookContext(applyCtx, alice.id(), alice.id(), {});
         auto& api = hookCtx.api();
 
-        BEAST_EXPECT(api.sto_validate(Bytes{}).error() == TOO_SMALL);
-        BEAST_EXPECT(api.sto_validate(Bytes{0x00}).error() == TOO_SMALL);
+        // a buffer shorter than two bytes can't be a valid STObject:
+        // fix20261005 reports it as invalid rather than as TOO_SMALL
+        if (env.closed()->rules().enabled(fix20261005))
+        {
+            BEAST_EXPECT(api.sto_validate(Bytes{}).value() == false);
+            BEAST_EXPECT(api.sto_validate(Bytes{0x00}).value() == false);
+            BEAST_EXPECT(api.sto_validate(Bytes{0xE1}).value() == false);
+        }
+        else
+        {
+            BEAST_EXPECT(api.sto_validate(Bytes{}).error() == TOO_SMALL);
+            BEAST_EXPECT(api.sto_validate(Bytes{0x00}).error() == TOO_SMALL);
+            BEAST_EXPECT(api.sto_validate(Bytes{0xE1}).error() == TOO_SMALL);
+        }
 
         // { Memo: {MemoData: "BEEF"} }
         auto const memos = *strUnHex("EA7D02BEEFE1");
@@ -4397,34 +4749,17 @@ public:
         // { AmountEntry: {Amount: "100"} }
         auto const amountEntry = *strUnHex("E05B614000000000000064E1");
 
-        BEAST_EXPECT(api.sto_validate(memos).value() == true);
-        BEAST_EXPECT(api.sto_validate(amounts).value() == true);
-        BEAST_EXPECT(api.sto_validate(memo).value() == true);
-        BEAST_EXPECT(api.sto_validate(amountEntry).value() == true);
+        for (auto const& data : {memos, amounts, memo, amountEntry})
+        {
+            // Valid data
+            BEAST_EXPECT(api.sto_validate(data).value() == true);
 
-        // Invalid data
-        BEAST_EXPECT(
-            api.sto_validate(Bytes{0xFF, 0xFF, 0xFF, 0xFF}).value() == false);
-
-        Bytes const i_memos(&memos[0], &memos[memos.size() - 1]);
-        Bytes const i_amounts(&amounts[0], &amounts[amounts.size() - 1]);
-        Bytes const i_memo(&memo[0], &memo[memo.size() - 1]);
-        Bytes const i_amountEntry(
-            &amountEntry[0], &amountEntry[amountEntry.size() - 1]);
-        BEAST_EXPECT(api.sto_validate(i_memos).value() == false);
-        BEAST_EXPECT(api.sto_validate(i_amounts).value() == false);
-        BEAST_EXPECT(api.sto_validate(i_memo).value() == false);
-        BEAST_EXPECT(api.sto_validate(i_amountEntry).value() == false);
-
-        Bytes const i2_memos(&memos[1], &memos[memos.size()]);
-        Bytes const i2_amounts(&amounts[1], &amounts[amounts.size()]);
-        Bytes const i2_memo(&memo[1], &memo[memo.size()]);
-        Bytes const i2_amountEntry(
-            &amountEntry[1], &amountEntry[amountEntry.size()]);
-        BEAST_EXPECT(api.sto_validate(i_memos).value() == false);
-        BEAST_EXPECT(api.sto_validate(i_amounts).value() == false);
-        BEAST_EXPECT(api.sto_validate(i_memo).value() == false);
-        BEAST_EXPECT(api.sto_validate(i_amountEntry).value() == false);
+            // Invalid data
+            auto const partial_data = Blob{data.begin(), data.end() - 1};
+            BEAST_EXPECT(api.sto_validate(partial_data).value() == false);
+            auto const partial_data2 = Blob{data.begin() + 1, data.end()};
+            BEAST_EXPECT(api.sto_validate(partial_data2).value() == false);
+        }
     }
 
     void
@@ -4477,6 +4812,22 @@ public:
         BEAST_EXPECT(accid.has_value());
         auto aliceid = alice.id();
         BEAST_EXPECT(accid.value() == Bytes(aliceid.begin(), aliceid.end()));
+
+        // Bytes outside the base58 alphabet, including >= 0x80, must be
+        // rejected wherever they appear (signed-char lookup regression)
+        {
+            std::string const addr = alice.human();
+            for (std::size_t pos = 0; pos < addr.size(); ++pos)
+            {
+                for (int const b : {0x00, 0x7f, 0x80, 0xc2, 0xff})
+                {
+                    std::string bad = addr;
+                    bad[pos] = static_cast<char>(b);
+                    auto const r = api.util_accid(bad);
+                    BEAST_EXPECT(!r && r.error() == INVALID_ARGUMENT);
+                }
+            }
+        }
     }
 
     void
@@ -4846,18 +5197,21 @@ public:
 
         test_prepare(features);
         test_emit(features);
+        test_emitted_txn_entry(features);
         test_etxn_burden(features);
         test_etxn_generation(features);
         test_otxn_burden(features);
         test_otxn_generation(features);
         test_etxn_details(features);
         test_etxn_fee_base(features - fixHookAPI20251128);
+        test_etxn_fee_base(features - fix20260929);
         test_etxn_fee_base(features);
         test_etxn_nonce(features);
         test_etxn_reserve(features);
         test_fee_base(features);
 
         test_otxn_field(features);
+        test_otxn_field_emit_failure(features);
 
         test_ledger_keylet(features);
 
@@ -4873,6 +5227,7 @@ public:
         test_float_one(features);
         test_float_root(features);
         test_float_set(features);
+        test_float_set(features - fix20261005);
         test_float_sign(features);
         test_float_sto(features);
         test_float_sto_set(features);
@@ -4911,16 +5266,24 @@ public:
 
         test_state(features);
         test_state_foreign(features);
+        test_state_foreign_read_accounting(features);
+        test_state_foreign_read_accounting(features - fix20261005);
+        test_state_foreign_read_accounting(
+            features - fix20261005 - featureExtendedHookState);
         test_state_foreign_set(features - fixHookMap);
         test_state_foreign_set(features);
         test_state_foreign_set_max(features);
         test_state_set(features);
 
         test_sto_emplace(features);
+        test_sto_emplace(features - fix20260929);
         // test_sto_erase(features); // tested in test_sto_emplace
         test_sto_subarray(features);
+        test_sto_subarray(features - fix20260929);
         test_sto_subfield(features);
+        test_sto_subfield(features - fix20260929);
         test_sto_validate(features);
+        test_sto_validate(features - fix20261005);
 
         test_trace(features);
         test_trace_float(features);

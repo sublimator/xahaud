@@ -28,6 +28,7 @@
 #include <xrpld/overlay/detail/Handshake.h>
 #include <xrpld/overlay/detail/TrafficCount.h>
 #include <xrpld/overlay/detail/TxMetrics.h>
+#include <xrpld/overlay/detail/XUSH.h>
 #include <xrpld/peerfinder/PeerfinderManager.h>
 #include <xrpld/rpc/ServerHandler.h>
 #include <xrpl/basics/Resolver.h>
@@ -36,8 +37,11 @@
 #include <xrpl/beast/utility/instrumentation.h>
 #include <xrpl/resource/ResourceManager.h>
 #include <xrpl/server/Handoff.h>
+
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/basic_waitable_timer.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ip/udp.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/container/flat_map.hpp>
@@ -97,9 +101,11 @@ private:
     };
 
     Application& app_;
-    boost::asio::io_service& io_service_;
-    std::optional<boost::asio::io_service::work> work_;
-    boost::asio::io_service::strand strand_;
+    boost::asio::io_context& io_context_;
+    std::optional<boost::asio::executor_work_guard<
+        boost::asio::io_context::executor_type>>
+        work_;
+    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
     mutable std::recursive_mutex mutex_;  // VFALCO use std::mutex
     std::condition_variable_any cond_;
     std::weak_ptr<Timer> timer_;
@@ -131,6 +137,15 @@ private:
     // Protects the message and the sequence list of manifests
     std::mutex manifestLock_;
 
+    // XUSH (Xahau UDP Superhighway) transaction reassembly
+    std::mutex xushMutex_;
+    xush::Reassembler xushReassembler_;
+
+    // XUSH (Xahau UDP Superhighway) sockets used for sending
+    std::mutex xushSendMutex_;
+    boost::asio::ip::udp::socket xushSocket4_;
+    boost::asio::ip::udp::socket xushSocket6_;
+
     //--------------------------------------------------------------------------
 
 public:
@@ -140,7 +155,7 @@ public:
         ServerHandler& serverHandler,
         Resource::Manager& resourceManager,
         Resolver& resolver,
-        boost::asio::io_service& io_service,
+        boost::asio::io_context& io_context,
         BasicConfig const& config,
         beast::insight::Collector::ptr const& collector);
 
@@ -438,6 +453,14 @@ public:
         txMetrics_.addMetrics(args...);
     }
 
+    void
+    processXUSH(
+        std::string const& message,
+        boost::asio::ip::tcp::endpoint const& remoteEndpoint) override;
+
+    void
+    publishTxXUSH(Slice const& tx, uint256 const& txid) override;
+
 private:
     void
     squelch(
@@ -613,6 +636,49 @@ private:
         }
         m_stats.peerDisconnects = getPeerDisconnect();
     }
+
+    //--------------------------------------------------------------------------
+    //
+    // XUSH (Xahau UDP Superhighway)
+    //
+    //--------------------------------------------------------------------------
+
+    /** Open the sockets used to send highway datagrams. */
+    void
+    openXUSH();
+
+    /** Close the sockets used to send highway datagrams. */
+    void
+    closeXUSH();
+
+    /** Advertise some highway endpoints to some highway peers. */
+    void
+    sendXUSHPeers();
+
+    /** Send every datagram to every target. Sends never block: datagrams
+        that can't be sent immediately are dropped. */
+    void
+    sendXUSH(
+        std::vector<Buffer> const& datagrams,
+        std::vector<beast::IP::Endpoint> const& targets);
+
+    void
+    onXUSHPeers(
+        Slice datagram,
+        beast::IP::Endpoint const& remote,
+        Resource::Consumer& usage);
+
+    void
+    onXUSHTxnFragment(
+        Slice datagram,
+        beast::IP::Endpoint const& remote,
+        Resource::Consumer& usage);
+
+    void
+    onXUSHTransaction(
+        Buffer const& blob,
+        uint256 const& txid,
+        Resource::Consumer& usage);
 };
 
 }  // namespace ripple

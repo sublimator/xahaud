@@ -59,6 +59,7 @@
 #include <xrpld/rpc/detail/RPCHelpers.h>
 #include <xrpld/shamap/NodeFamily.h>
 #include <xrpl/basics/ByteUtilities.h>
+#include <xrpl/basics/FileUtilities.h>
 #include <xrpl/basics/ResolverAsio.h>
 #include <xrpl/basics/random.h>
 #include <xrpl/basics/safe_cast.h>
@@ -85,7 +86,6 @@
 #include <limits>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <utility>
 #include <variant>
 
@@ -111,7 +111,7 @@ private:
             beast::insight::Event ev,
             beast::Journal journal,
             std::chrono::milliseconds interval,
-            boost::asio::io_service& ios)
+            boost::asio::io_context& ios)
             : m_event(ev)
             , m_journal(journal)
             , m_probe(interval, ios)
@@ -139,7 +139,7 @@ private:
             if (lastSample >= 500ms)
             {
                 JLOG(m_journal.warn())
-                    << "io_service latency = " << lastSample.count();
+                    << "io_context latency = " << lastSample.count();
             }
         }
 
@@ -228,11 +228,7 @@ public:
 
     boost::asio::signal_set m_signals;
 
-    // Once we get C++20, we could use `std::atomic_flag` for `isTimeToStop`
-    // and eliminate the need for the condition variable and the mutex.
-    std::condition_variable stoppingCondition_;
-    mutable std::mutex stoppingMutex_;
-    std::atomic<bool> isTimeToStop = false;
+    std::atomic_flag isTimeToStop;
 
     std::atomic<bool> checkSigs_;
 
@@ -410,7 +406,7 @@ public:
               *m_jobQueue,
               *m_ledgerMaster,
               validatorKeys_,
-              get_io_service(),
+              get_io_context(),
               logs_->journal("NetworkOPs"),
               m_collectorManager->collector()))
 
@@ -437,7 +433,7 @@ public:
 
         , serverHandler_(make_ServerHandler(
               *this,
-              get_io_service(),
+              get_io_context(),
               *m_jobQueue,
               *m_networkOPs,
               *m_resourceManager,
@@ -461,22 +457,22 @@ public:
         , txQ_(
               std::make_unique<TxQ>(setup_TxQ(*config_), logs_->journal("TxQ")))
 
-        , sweepTimer_(get_io_service())
+        , sweepTimer_(get_io_context())
 
-        , entropyTimer_(get_io_service())
+        , entropyTimer_(get_io_context())
 
-        , m_signals(get_io_service())
+        , m_signals(get_io_context())
 
         , checkSigs_(true)
 
         , m_resolver(
-              ResolverAsio::New(get_io_service(), logs_->journal("Resolver")))
+              ResolverAsio::New(get_io_context(), logs_->journal("Resolver")))
 
         , m_io_latency_sampler(
               m_collectorManager->collector()->make_event("ios_latency"),
               logs_->journal("Application"),
               std::chrono::milliseconds(100),
-              get_io_service())
+              get_io_context())
         , grpcServer_(std::make_unique<GRPCServer>(*this))
     {
         initAccountIdCache(config_->getValueFor(SizedItem::accountIdCacheSize));
@@ -599,10 +595,10 @@ public:
         return *serverHandler_;
     }
 
-    boost::asio::io_service&
-    getIOService() override
+    boost::asio::io_context&
+    getIOContext() override
     {
-        return get_io_service();
+        return get_io_context();
     }
 
     std::chrono::milliseconds
@@ -940,9 +936,8 @@ public:
                 }))
         {
             using namespace std::chrono;
-            sweepTimer_.expires_from_now(
-                seconds{config_->SWEEP_INTERVAL.value_or(
-                    config_->getValueFor(SizedItem::sweepInterval))});
+            sweepTimer_.expires_after(seconds{config_->SWEEP_INTERVAL.value_or(
+                config_->getValueFor(SizedItem::sweepInterval))});
             sweepTimer_.async_wait(std::move(*optionalCountedHandler));
         }
     }
@@ -971,7 +966,7 @@ public:
                 }))
         {
             using namespace std::chrono_literals;
-            entropyTimer_.expires_from_now(5min);
+            entropyTimer_.expires_after(5min);
             entropyTimer_.async_wait(std::move(*optionalCountedHandler));
         }
     }
@@ -1415,7 +1410,7 @@ ApplicationImp::setup(boost::program_options::variables_map const& cmdline)
         *serverHandler_,
         *m_resourceManager,
         *m_resolver,
-        get_io_service(),
+        get_io_context(),
         *config_,
         m_collectorManager->collector());
     add(*overlay_);  // add to PropertyStream
@@ -1586,21 +1581,18 @@ ApplicationImp::run()
         getLoadManager().activateDeadlockDetector();
     }
 
-    {
-        std::unique_lock<std::mutex> lk{stoppingMutex_};
-        stoppingCondition_.wait(lk, [this] { return isTimeToStop.load(); });
-    }
+    isTimeToStop.wait(false, std::memory_order_relaxed);
 
     JLOG(m_journal.debug()) << "Application stopping";
 
     m_io_latency_sampler.cancel_async();
 
     // VFALCO Enormous hack, we have to force the probe to cancel
-    //        before we stop the io_service queue or else it never
+    //        before we stop the io_context queue or else it never
     //        unblocks in its destructor. The fix is to make all
     //        io_objects gracefully handle exit so that we can
-    //        naturally return from io_service::run() instead of
-    //        forcing a call to io_service::stop()
+    //        naturally return from io_context::run() instead of
+    //        forcing a call to io_context::stop()
     m_io_latency_sampler.cancel();
 
     m_resolver->stop_async();
@@ -1611,20 +1603,24 @@ ApplicationImp::run()
     m_resolver->stop();
 
     {
-        boost::system::error_code ec;
-        sweepTimer_.cancel(ec);
-        if (ec)
+        try
+        {
+            sweepTimer_.cancel();
+        }
+        catch (boost::system::system_error const& e)
         {
             JLOG(m_journal.error())
-                << "Application: sweepTimer cancel error: " << ec.message();
+                << "Application: sweepTimer cancel error: " << e.what();
         }
 
-        ec.clear();
-        entropyTimer_.cancel(ec);
-        if (ec)
+        try
+        {
+            entropyTimer_.cancel();
+        }
+        catch (boost::system::system_error const& e)
         {
             JLOG(m_journal.error())
-                << "Application: entropyTimer cancel error: " << ec.message();
+                << "Application: entropyTimer cancel error: " << e.what();
         }
     }
 
@@ -1672,14 +1668,14 @@ ApplicationImp::run()
 void
 ApplicationImp::signalStop(std::string msg)
 {
-    if (!isTimeToStop.exchange(true))
+    if (!isTimeToStop.test_and_set(std::memory_order_acquire))
     {
         if (msg.empty())
             JLOG(m_journal.warn()) << "Server stopping";
         else
             JLOG(m_journal.warn()) << "Server stopping: " << msg;
 
-        stoppingCondition_.notify_all();
+        isTimeToStop.notify_all();
     }
 }
 
@@ -1698,7 +1694,7 @@ ApplicationImp::checkSigs(bool check)
 bool
 ApplicationImp::isStopping() const
 {
-    return isTimeToStop.load();
+    return isTimeToStop.test(std::memory_order_relaxed);
 }
 
 int
@@ -2371,6 +2367,65 @@ Application::Application() : beast::PropertyStream::Source("app")
 }
 
 //------------------------------------------------------------------------------
+
+boost::filesystem::path
+amendmentBlockedFilePath(Config const& config)
+{
+    return config.CONFIG_DIR / "README_AMENDMENT_BLOCKED";
+}
+
+boost::system::error_code
+writeAmendmentBlockedFile(
+    Config const& config,
+    std::vector<std::string> const& amendments)
+{
+    using namespace std::chrono;
+
+    std::ostringstream ss;
+    ss << "XAHAUD STOPPED: UPGRADE REQUIRED\n"
+       << "\n"
+       << "Stopped at:  "
+       << to_string_iso(time_point_cast<seconds>(system_clock::now())) << "\n"
+       << "This build:  " << BuildInfo::getVersionString() << "\n"
+       << "\n";
+
+    if (amendments.empty())
+    {
+        ss << "One or more network amendments are not supported by this "
+              "build.\n";
+    }
+    else
+    {
+        ss << "Amendments this build does not support:\n";
+        for (auto const& amendment : amendments)
+            ss << "  " << amendment << "\n";
+    }
+
+    ss << "\n"
+       << "The network has moved to rules this build does not implement, so "
+          "the\n"
+       << "server stopped rather than keep serving ledgers it cannot read.\n"
+       << "\n"
+       << "To get back in sync:\n"
+       << "1. Upgrade xahaud to a version that supports the amendments "
+          "above.\n"
+       << "2. Start xahaud again. This file is removed automatically on "
+          "start.\n"
+       << "\n"
+       << "Starting this build again without upgrading will stop the server "
+          "again\n"
+       << "and rewrite this file. Nothing needs to be deleted by hand.\n";
+
+    boost::system::error_code ec;
+    writeFileContents(ec, amendmentBlockedFilePath(config), ss.str());
+    return ec;
+}
+
+bool
+removeAmendmentBlockedFile(Config const& config, boost::system::error_code& ec)
+{
+    return boost::filesystem::remove(amendmentBlockedFilePath(config), ec);
+}
 
 std::unique_ptr<Application>
 make_Application(

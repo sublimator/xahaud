@@ -12,6 +12,7 @@ libxrpl.server > xrpl.basics
 libxrpl.server > xrpl.json
 libxrpl.server > xrpl.protocol
 libxrpl.server > xrpl.server
+test.app > test.shamap
 test.app > test.toplevel
 test.app > test.unit_test
 test.app > xrpl.basics
@@ -21,6 +22,7 @@ test.app > xrpld.ledger
 test.app > xrpld.nodestore
 test.app > xrpld.overlay
 test.app > xrpld.rpc
+test.app > xrpld.shamap
 test.app > xrpl.hook
 test.app > xrpl.json
 test.app > xrpl.protocol
@@ -32,6 +34,7 @@ test.basics > xrpld.perflog
 test.basics > xrpld.rpc
 test.basics > xrpl.json
 test.basics > xrpl.protocol
+test.beast > test.unit_test
 test.beast > xrpl.basics
 test.conditions > xrpl.basics
 test.conditions > xrpld.conditions
@@ -77,6 +80,11 @@ test.ledger > xrpld.app
 test.ledger > xrpld.core
 test.ledger > xrpld.ledger
 test.ledger > xrpl.protocol
+test.net > test.toplevel
+test.net > xrpl.basics
+test.net > xrpld.core
+test.net > xrpld.net
+test.net > xrpl.json
 test.nodestore > test.jtx
 test.nodestore > test.toplevel
 test.nodestore > test.unit_test
@@ -90,10 +98,12 @@ test.overlay > test.toplevel
 test.overlay > test.unit_test
 test.overlay > xrpl.basics
 test.overlay > xrpld.app
+test.overlay > xrpld.core
 test.overlay > xrpld.overlay
 test.overlay > xrpld.peerfinder
 test.overlay > xrpld.shamap
 test.overlay > xrpl.protocol
+test.overlay > xrpl.resource
 test.peerfinder > test.beast
 test.peerfinder > test.unit_test
 test.peerfinder > xrpl.basics
@@ -185,6 +195,7 @@ xrpld.overlay > xrpl.basics
 xrpld.overlay > xrpld.core
 xrpld.overlay > xrpld.peerfinder
 xrpld.overlay > xrpld.perflog
+xrpld.overlay > xrpld.shamap
 xrpld.overlay > xrpl.json
 xrpld.overlay > xrpl.protocol
 xrpld.overlay > xrpl.resource
@@ -200,6 +211,7 @@ xrpld.rpc > xrpld.core
 xrpld.rpc > xrpld.ledger
 xrpld.rpc > xrpld.nodestore
 xrpld.rpc > xrpld.shamap
+xrpld.rpc > xrpl.hook
 xrpld.rpc > xrpl.json
 xrpld.rpc > xrpl.protocol
 xrpld.rpc > xrpl.resource

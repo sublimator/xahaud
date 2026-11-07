@@ -30,12 +30,6 @@
 
 namespace ripple {
 
-TxConsequences
-ClaimReward::makeTxConsequences(PreflightContext const& ctx)
-{
-    return TxConsequences{ctx.tx, TxConsequences::normal};
-}
-
 NotTEC
 ClaimReward::preflight(PreflightContext const& ctx)
 {
@@ -164,7 +158,11 @@ ClaimReward::preclaim(PreclaimContext const& ctx)
 
                 auto const& hookOn =
                     hook::getHookOn(hook, sleDef, sfHookOnIncoming);
-                if (hook::canHook(ttCLAIM_REWARD, hookOn))
+                auto const hookName = ctx.view.rules().enabled(fix20260929) &&
+                        hook.isFieldPresent(sfHookName)
+                    ? std::optional<Blob>(hook.getFieldVL(sfHookName))
+                    : std::nullopt;
+                if (hook::canHook(ctx.tx, hookOn, hookName))
                 {
                     hasClaimRewardHook = true;
                     break;

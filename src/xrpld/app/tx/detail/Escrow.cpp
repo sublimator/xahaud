@@ -454,23 +454,11 @@ EscrowFinish::preflight(PreflightContext const& ctx)
 
     // sfOfferSequence was changed to optional, so ensure the behaviour is the
     // same until amendment passes
-    if (!ctx.rules.enabled(fixXahauV1))
-    {
-        if (!ctx.tx.isFieldPresent(sfOfferSequence))
-            return temMALFORMED;
-
-        if (ctx.tx.isFieldPresent(sfEscrowID) &&
-            ctx.tx.getFieldU32(sfOfferSequence) != 0)
-            return temMALFORMED;
-    }
-    else
-    {
-        if ((!ctx.tx.isFieldPresent(sfEscrowID) &&
-             !ctx.tx.isFieldPresent(sfOfferSequence)) ||
-            (ctx.tx.isFieldPresent(sfEscrowID) &&
-             ctx.tx.isFieldPresent(sfOfferSequence)))
-            return temMALFORMED;
-    }
+    if ((!ctx.tx.isFieldPresent(sfEscrowID) &&
+         !ctx.tx.isFieldPresent(sfOfferSequence)) ||
+        (ctx.tx.isFieldPresent(sfEscrowID) &&
+         ctx.tx.isFieldPresent(sfOfferSequence)))
+        return temMALFORMED;
 
     return tesSUCCESS;
 }
@@ -512,8 +500,6 @@ EscrowFinish::doApply()
     std::optional<uint256> escrowID = ctx_.tx[~sfEscrowID];
     std::optional<std::uint32_t> offerSequence = ctx_.tx[~sfOfferSequence];
 
-    bool const fixV1 = view().rules().enabled(fixXahauV1);
-
     Keylet k = escrowID ? Keylet(ltESCROW, *escrowID)
                         : keylet::escrow(ctx_.tx[sfOwner], *offerSequence);
 
@@ -521,7 +507,7 @@ EscrowFinish::doApply()
     if (!slep)
         return tecNO_TARGET;
 
-    if (fixV1 && slep->getFieldU16(sfLedgerEntryType) != ltESCROW)
+    if (slep->getFieldU16(sfLedgerEntryType) != ltESCROW)
         return tecINTERNAL;
 
     AccountID const account = (*slep)[sfAccount];
@@ -740,23 +726,11 @@ EscrowCancel::preflight(PreflightContext const& ctx)
 
     // sfOfferSequence was changed to optional, so ensure the behaviour is the
     // same until amendment passes
-    if (!ctx.rules.enabled(fixXahauV1))
-    {
-        if (!ctx.tx.isFieldPresent(sfOfferSequence))
-            return temMALFORMED;
-
-        if (ctx.tx.isFieldPresent(sfEscrowID) &&
-            ctx.tx.getFieldU32(sfOfferSequence) != 0)
-            return temMALFORMED;
-    }
-    else
-    {
-        if ((!ctx.tx.isFieldPresent(sfEscrowID) &&
-             !ctx.tx.isFieldPresent(sfOfferSequence)) ||
-            (ctx.tx.isFieldPresent(sfEscrowID) &&
-             ctx.tx.isFieldPresent(sfOfferSequence)))
-            return temMALFORMED;
-    }
+    if ((!ctx.tx.isFieldPresent(sfEscrowID) &&
+         !ctx.tx.isFieldPresent(sfOfferSequence)) ||
+        (ctx.tx.isFieldPresent(sfEscrowID) &&
+         ctx.tx.isFieldPresent(sfOfferSequence)))
+        return temMALFORMED;
 
     return preflight2(ctx);
 }
@@ -772,8 +746,6 @@ EscrowCancel::doApply()
     std::optional<uint256> escrowID = ctx_.tx[~sfEscrowID];
     std::optional<std::uint32_t> offerSequence = ctx_.tx[~sfOfferSequence];
 
-    bool const fixV1 = view().rules().enabled(fixXahauV1);
-
     Keylet k = escrowID ? Keylet(ltESCROW, *escrowID)
                         : keylet::escrow(ctx_.tx[sfOwner], *offerSequence);
 
@@ -781,31 +753,42 @@ EscrowCancel::doApply()
     if (!slep)
         return tecNO_TARGET;
 
-    if (fixV1 && slep->getFieldU16(sfLedgerEntryType) != ltESCROW)
+    if (slep->getFieldU16(sfLedgerEntryType) != ltESCROW)
         return tecINTERNAL;
 
-    if (ctx_.view().rules().enabled(fix1571))
-    {
-        auto const now = ctx_.view().info().parentCloseTime;
-
-        // No cancel time specified: can't execute at all.
-        if (!(*slep)[~sfCancelAfter])
-            return tecNO_PERMISSION;
-
-        // Too soon: can't execute before the cancel time.
-        if (!after(now, (*slep)[sfCancelAfter]))
-            return tecNO_PERMISSION;
-    }
-    else
-    {
-        // Too soon?
-        if (!(*slep)[~sfCancelAfter] ||
-            ctx_.view().info().parentCloseTime.time_since_epoch().count() <=
-                (*slep)[sfCancelAfter])
-            return tecNO_PERMISSION;
-    }
-
     AccountID const account = (*slep)[sfAccount];
+
+    // The destination of an escrow may decline it at any time, returning the
+    // funds to the owner. Self-escrows are excluded so that a timelock on
+    // one's own funds remains binding.
+    bool const destinationCancel =
+        ctx_.view().rules().enabled(featureEscrowDestinationCancel) &&
+        account_ == slep->getAccountID(sfDestination) && account_ != account;
+
+    if (!destinationCancel)
+    {
+        if (ctx_.view().rules().enabled(fix1571))
+        {
+            auto const now = ctx_.view().info().parentCloseTime;
+
+            // No cancel time specified: can't execute at all.
+            if (!(*slep)[~sfCancelAfter])
+                return tecNO_PERMISSION;
+
+            // Too soon: can't execute before the cancel time.
+            if (!after(now, (*slep)[sfCancelAfter]))
+                return tecNO_PERMISSION;
+        }
+        else
+        {
+            // Too soon?
+            if (!(*slep)[~sfCancelAfter] ||
+                ctx_.view().info().parentCloseTime.time_since_epoch().count() <=
+                    (*slep)[sfCancelAfter])
+                return tecNO_PERMISSION;
+        }
+    }
+
     auto const sle = ctx_.view().peek(keylet::account(account));
     auto const amount = slep->getFieldAmount(sfAmount);
     bool const isIssuer = amount.getIssuer() == account;

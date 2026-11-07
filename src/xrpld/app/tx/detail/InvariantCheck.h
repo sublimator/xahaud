@@ -26,6 +26,8 @@
 #include <xrpl/protocol/STTx.h>
 #include <xrpl/protocol/TER.h>
 
+#include <boost/multiprecision/cpp_int.hpp>
+
 #include <cstdint>
 #include <tuple>
 
@@ -116,7 +118,9 @@ public:
  */
 class XRPNotCreated
 {
-    std::int64_t drops_ = 0;
+    // Full-width running total so a wrap of a 64-bit accumulator cannot
+    // hide XRP creation.
+    boost::multiprecision::int128_t drops_ = 0;
     std::uint32_t accountsCreated_ = 0;
 
 public:
@@ -704,8 +708,37 @@ public:
         beast::Journal const&);
 };
 
-// additional invariant checks can be declared above and then added to this
-// tuple
+/**
+ * @brief Invariant: AppLoader objects stay consistent with their owners.
+ *
+ * An ltAPP_LOADER is in no owner directory, so nothing else would notice it
+ * drifting. For every transaction that creates, changes or deletes one:
+ * featurePWALoader is enabled and the transaction is an AccountSet or
+ * AccountDelete; a live loader is keyed at keylet::appLoader(sfOwner), its
+ * blob passes appLoader::validate, and its AppLoaderSequence equals its
+ * owner's.
+ */
+class ValidAppLoader
+{
+    bool touched_ = false;
+    std::vector<std::shared_ptr<SLE const>> live_;
+
+public:
+    void
+    visitEntry(
+        bool,
+        std::shared_ptr<SLE const> const&,
+        std::shared_ptr<SLE const> const&);
+
+    bool
+    finalize(
+        STTx const&,
+        TER const,
+        XRPAmount const,
+        ReadView const&,
+        beast::Journal const&);
+};
+
 using InvariantChecks = std::tuple<
     TransactionFeeCheck,
     AccountRootsNotDeleted,
@@ -725,7 +758,8 @@ using InvariantChecks = std::tuple<
     ValidMPTIssuance,
     ValidPermissionedDomain,
     ValidAMM,
-    ValidLockedBalance>;
+    ValidLockedBalance,
+    ValidAppLoader>;
 
 /**
  * @brief get a tuple of all invariant checks

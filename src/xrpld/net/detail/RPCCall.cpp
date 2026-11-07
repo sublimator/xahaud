@@ -533,6 +533,15 @@ private:
         return jvRequest;
     }
 
+    // hook_validate <hex>
+    Json::Value
+    parseHookValidate(Json::Value const& jvParams)
+    {
+        Json::Value jvRequest(Json::objectValue);
+        jvRequest[jss::code] = jvParams[0u].asString();
+        return jvRequest;
+    }
+
     // sign_for <account> <secret> <json> offline
     // sign_for <account> <secret> <json>
     Json::Value
@@ -1371,6 +1380,34 @@ private:
         return jvRequest;
     }
 
+    // pwa_info [reset] [flush_dns]
+    Json::Value
+    parsePWAInfo(Json::Value const& jvParams)
+    {
+        Json::Value jvRequest(Json::objectValue);
+        for (Json::UInt i = 0; i < jvParams.size(); ++i)
+        {
+            auto const param = jvParams[i].asString();
+            if ((param != "reset" && param != "flush_dns") ||
+                jvRequest.isMember(param))
+                return rpcError(rpcINVALID_PARAMS);
+            jvRequest[param] = true;
+        }
+        return jvRequest;
+    }
+
+    // pwa_validate <account> <hash> [<domain>]
+    Json::Value
+    parsePWAValidate(Json::Value const& jvParams)
+    {
+        Json::Value jvRequest(Json::objectValue);
+        jvRequest[jss::account] = jvParams[0u].asString();
+        jvRequest[jss::hash] = jvParams[1u].asString();
+        if (jvParams.size() > 2)
+            jvRequest[jss::domain] = jvParams[2u].asString();
+        return jvRequest;
+    }
+
     // server_info [counters]
     Json::Value
     parseServerInfo(Json::Value const& jvParams)
@@ -1443,6 +1480,7 @@ public:
             {"fetch_info", &RPCParser::parseFetchInfo, 0, 1},
             {"gateway_balances", &RPCParser::parseGatewayBalances, 1, -1},
             {"get_counts", &RPCParser::parseGetCounts, 0, 1},
+            {"hook_validate", &RPCParser::parseHookValidate, 1, 1},
             {"json", &RPCParser::parseJson, 2, 2},
             {"json2", &RPCParser::parseJson2, 1, 1},
             {"ledger", &RPCParser::parseLedger, 0, 2},
@@ -1459,6 +1497,8 @@ public:
             {"peers", &RPCParser::parseAsIs, 0, 0},
             {"ping", &RPCParser::parseAsIs, 0, 0},
             {"print", &RPCParser::parseAsIs, 0, 1},
+            {"pwa_info", &RPCParser::parsePWAInfo, 0, 2},
+            {"pwa_validate", &RPCParser::parsePWAValidate, 2, 3},
             //      {   "profile",              &RPCParser::parseProfile, 1,  9
             //      },
             {"random", &RPCParser::parseAsIs, 0, 0},
@@ -1585,6 +1625,10 @@ struct RPCCallImp
             // callbackFuncP.
 
             // Receive reply
+            if (ecResult)
+                Throw<std::runtime_error>(
+                    "RPC transport error: " + ecResult.message());
+
             if (strData.empty())
                 Throw<std::runtime_error>(
                     "no response from server. Please "
@@ -1748,7 +1792,8 @@ rpcClient(
             }
 
             {
-                boost::asio::io_service isService;
+                //@@start blocking-request
+                boost::asio::io_context isService;
                 RPCCall::fromNetwork(
                     isService,
                     setup.client.ip,
@@ -1771,6 +1816,7 @@ rpcClient(
                     headers);
                 isService.run();  // This blocks until there are no more
                                   // outstanding async calls.
+                //@@end blocking-request
             }
             if (jvOutput.isMember("result"))
             {
@@ -1852,7 +1898,7 @@ fromCommandLine(
 
 void
 fromNetwork(
-    boost::asio::io_service& io_service,
+    boost::asio::io_context& io_context,
     std::string const& strIp,
     const std::uint16_t iPort,
     std::string const& strUsername,
@@ -1881,18 +1927,24 @@ fromNetwork(
 
     // Send request
 
-    // Number of bytes to try to receive if no
-    // Content-Length header received
-    constexpr auto RPC_REPLY_MAX_BYTES = megabytes(256);
+    // Number of bytes to try to receive if no Content-Length header is
+    // received. Webhook event deliveries ("event") ignore the response
+    // body, so a missing Content-Length must not pre-allocate the full
+    // 256MB RPC reply budget per in-flight delivery (maxInFlight can be
+    // 32 -> 8GB). Cap those small; genuine RPC replies (CLI) keep the
+    // large budget.
+    auto const RPC_REPLY_MAX_BYTES =
+        (strMethod == "event") ? megabytes(1) : megabytes(256);
 
     using namespace std::chrono_literals;
     // auto constexpr RPC_NOTIFY = 10min; // Wietse: lolwut 10 minutes for one
     // HTTP call?
     auto constexpr RPC_NOTIFY = 30s;
 
+    //@@start async-request
     HTTPClient::request(
         bSSL,
-        io_service,
+        io_context,
         strIp,
         iPort,
         std::bind(
@@ -1914,6 +1966,7 @@ fromNetwork(
             std::placeholders::_3,
             j),
         j);
+    //@@end async-request
 }
 
 }  // namespace RPCCall

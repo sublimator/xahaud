@@ -25,14 +25,17 @@
 #include <xrpld/app/ledger/LedgerMaster.h>
 #include <xrpld/app/ledger/LedgerToJson.h>
 #include <xrpld/app/ledger/LocalTxs.h>
+#include <xrpld/app/ledger/ManifestSync.h>
 #include <xrpld/app/ledger/OpenLedger.h>
 #include <xrpld/app/ledger/OrderBookDB.h>
 #include <xrpld/app/ledger/TransactionMaster.h>
+#include <xrpld/app/main/Application.h>
 #include <xrpld/app/main/LoadManager.h>
 #include <xrpld/app/misc/AmendmentTable.h>
 #include <xrpld/app/misc/DeliverMax.h>
 #include <xrpld/app/misc/HashRouter.h>
 #include <xrpld/app/misc/LoadFeeTrack.h>
+#include <xrpld/app/misc/Manifest.h>
 #include <xrpld/app/misc/NetworkOPs.h>
 #include <xrpld/app/misc/StateAccounting.h>
 #include <xrpld/app/misc/Transaction.h>
@@ -42,6 +45,7 @@
 #include <xrpld/app/misc/detail/AccountTxPaging.h>
 #include <xrpld/app/rdb/backend/SQLiteDatabase.h>
 #include <xrpld/app/tx/apply.h>
+#include <xrpld/app/tx/detail/SetManifest.h>  // makeSetManifestTx
 #include <xrpld/consensus/Consensus.h>
 #include <xrpld/consensus/ConsensusParms.h>
 #include <xrpld/overlay/Cluster.h>
@@ -54,6 +58,7 @@
 #include <xrpld/rpc/MPTokenIssuanceID.h>
 #include <xrpld/rpc/ServerHandler.h>
 #include <xrpld/rpc/detail/UDPInfoSub.h>
+#include <xrpl/basics/StringUtilities.h>
 #include <xrpl/basics/UptimeClock.h>
 #include <xrpl/basics/mulDiv.h>
 #include <xrpl/basics/safe_cast.h>
@@ -68,6 +73,7 @@
 #include <xrpl/protocol/MultiApiJson.h>
 #include <xrpl/protocol/RPCErr.h>
 #include <xrpl/protocol/STParsedJSON.h>
+#include <xrpl/protocol/Serializer.h>
 #include <xrpl/protocol/jss.h>
 #include <xrpl/resource/Fees.h>
 #include <xrpl/resource/ResourceManager.h>
@@ -160,7 +166,7 @@ public:
         JobQueue& job_queue,
         LedgerMaster& ledgerMaster,
         ValidatorKeys const& validatorKeys,
-        boost::asio::io_service& io_svc,
+        boost::asio::io_context& io_svc,
         beast::Journal journal,
         beast::insight::Collector::ptr const& collector)
         : app_(app)
@@ -311,6 +317,15 @@ private:
     switchLastClosedLedger(std::shared_ptr<Ledger const> const& newLCL);
     bool
     checkLastClosedLedger(const Overlay::PeerSequence&, uint256& networkClosed);
+    void
+    publishNewerManifests(ReadView const& ledger);
+
+    /** Read manifests from ledgers peers report, while too few of this node's
+        validators can be resolved to trust any ledger. See
+        [early_manifest_sync].
+    */
+    void
+    bootstrapManifests();
 
 public:
     bool
@@ -499,31 +514,35 @@ public:
     stop() override
     {
         {
-            boost::system::error_code ec;
-            heartbeatTimer_.cancel(ec);
-            if (ec)
+            try
+            {
+                heartbeatTimer_.cancel();
+            }
+            catch (boost::system::system_error const& e)
             {
                 JLOG(m_journal.error())
-                    << "NetworkOPs: heartbeatTimer cancel error: "
-                    << ec.message();
+                    << "NetworkOPs: heartbeatTimer cancel error: " << e.what();
             }
 
-            ec.clear();
-            clusterTimer_.cancel(ec);
-            if (ec)
+            try
+            {
+                clusterTimer_.cancel();
+            }
+            catch (boost::system::system_error const& e)
             {
                 JLOG(m_journal.error())
-                    << "NetworkOPs: clusterTimer cancel error: "
-                    << ec.message();
+                    << "NetworkOPs: clusterTimer cancel error: " << e.what();
             }
 
-            ec.clear();
-            accountHistoryTxTimer_.cancel(ec);
-            if (ec)
+            try
+            {
+                accountHistoryTxTimer_.cancel();
+            }
+            catch (boost::system::system_error const& e)
             {
                 JLOG(m_journal.error())
                     << "NetworkOPs: accountHistoryTxTimer cancel error: "
-                    << ec.message();
+                    << e.what();
             }
         }
         // Make sure that any waitHandlers pending in our timers are done.
@@ -656,6 +675,12 @@ private:
     std::atomic<OperatingMode> mMode;
 
     std::atomic<bool> needNetworkLedger_{false};
+
+    /** State of bootstrapManifests(), which only the heartbeat calls. */
+    std::mutex manifestBootstrapMutex_;
+    hash_set<uint256> manifestBootstrapTried_;
+    std::chrono::steady_clock::time_point manifestBootstrapNext_{};
+
     std::atomic<bool> amendmentBlocked_{false};
     std::atomic<bool> amendmentWarned_{false};
     std::atomic<bool> unlBlocked_{false};
@@ -693,7 +718,10 @@ private:
 
     std::array<SubMapType, SubTypes::sLastEntry> mStreamMaps;
 
-    ServerFeeSummary mLastFeeSummary;
+    ServerFeeSummary mLastFeeSummary;  ///< Guarded by mFeeSummaryMutex_.
+    std::mutex mFeeSummaryMutex_;      ///< Guards mLastFeeSummary only. Kept
+                                       ///< separate from mSubLock to avoid
+    ///< lock-ordering hazards with masterMutex.
 
     JobQueue& m_job_queue;
 
@@ -885,7 +913,7 @@ NetworkOPsImp::setTimer(
                 }
             }))
     {
-        timer.expires_from_now(expiry_time);
+        timer.expires_after(expiry_time);
         timer.async_wait(std::move(*optionalCountedHandler));
     }
 }
@@ -1013,6 +1041,8 @@ NetworkOPsImp::processHeartbeatTimer()
     }
     CLOG(clog.ss()) << ". ";
 
+    bootstrapManifests();
+
     setHeartbeatTimer();
 }
 
@@ -1125,6 +1155,16 @@ NetworkOPsImp::submitTransaction(std::shared_ptr<STTx const> const& iTrans)
 
     try
     {
+        // Not a bad signature: this server may not have reached the fee
+        // setting the transaction was built for. Drop without marking it bad.
+        if (auto const [fee, feeReason] = checkManifestIngressFee(app_, *trans);
+            fee == ManifestIngressFee::Refused)
+        {
+            JLOG(m_journal.debug())
+                << "Submitted manifest-authorized tx dropped: " << feeReason;
+            return;
+        }
+
         auto const [validity, reason] = checkValidity(
             app_.getHashRouter(),
             *trans,
@@ -1154,6 +1194,171 @@ NetworkOPsImp::submitTransaction(std::shared_ptr<STTx const> const& iTrans)
         auto t = tx;
         processTransaction(t, false, false, FailHard::no);
     });
+}
+
+void
+NetworkOPsImp::publishNewerManifests(ReadView const& ledger)
+{
+    for (auto const& pk : app_.validators().getTrustedMasterKeys())
+    {
+        // Only for validators that have opted in by publishing on-ledger
+        // already. Submitting spends the master key account's balance, so an
+        // account that has never used the feature is left alone.
+        auto const sleMan = ledger.read(keylet::manifest(pk));
+        if (!sleMan)
+            continue;
+
+        auto const held = app_.validatorManifests().getRawManifest(pk);
+        if (!held || held->first <= sleMan->getFieldU32(sfSequence))
+            continue;
+
+        auto const hex = makeSetManifestTx(
+            makeSlice(held->second),
+            app_.config().NETWORK_ID,
+            *app_.openLedger().current(),
+            app_.journal("Manifest"));
+
+        auto const blob = hex ? strUnHex(*hex) : std::nullopt;
+        if (!blob || blob->empty())
+            continue;
+
+        std::shared_ptr<STTx const> stTx;
+        std::string reason;
+        std::shared_ptr<Transaction> tx;
+        try
+        {
+            SerialIter sit{makeSlice(*blob)};
+            stTx = std::make_shared<STTx const>(std::ref(sit));
+            tx = std::make_shared<Transaction>(stTx, reason, app_);
+        }
+        catch (std::exception const& e)
+        {
+            JLOG(m_journal.warn())
+                << "publishNewerManifests: " << e.what() << " " << reason;
+            continue;
+        }
+
+        if (tx->getStatus() != NEW)
+            continue;
+
+        // The master key account pays. Skip rather than submit something that
+        // can only fail: this runs every ledger, so an unfunded validator
+        // would otherwise be retried forever.
+        auto const sleAcct = ledger.read(keylet::account(calcAccountID(pk)));
+        if (!sleAcct ||
+            sleAcct->getFieldAmount(sfBalance).xrp() < (*stTx)[sfFee].xrp())
+            continue;
+
+        JLOG(m_journal.info())
+            << "publishNewerManifests: publishing manifest seq " << held->first
+            << " for " << toBase58(TokenType::NodePublic, pk);
+
+        // Submitted from the job queue because this runs on the consensus
+        // thread, which must not block on transaction processing.
+        m_job_queue.addJob(jtTRANSACTION, "publishManifest", [this, tx]() {
+            auto t = tx;
+            processTransaction(t, false, false, FailHard::no);
+        });
+    }
+}
+
+namespace {
+
+/** How often a node that cannot resolve enough of its validators looks for
+    ledgers to read their manifests from. */
+constexpr std::chrono::seconds manifestBootstrapInterval{15};
+
+/** Most ledgers it starts reading at each look. */
+constexpr std::size_t manifestBootstrapWidth = 3;
+
+/** Ledgers remembered as read, past which the record starts over. */
+constexpr std::size_t manifestBootstrapMemory = 256;
+
+}  // namespace
+
+void
+NetworkOPsImp::bootstrapManifests()
+{
+    // Only until a ledger has been validated: from then on the manifests are
+    // kept current from each ledger as it closes, in beginConsensus().
+    if (!app_.config().EARLY_MANIFEST_SYNC || m_ledgerMaster.haveValidated())
+        return;
+
+    std::vector<uint256> picked;
+    {
+        auto const now = std::chrono::steady_clock::now();
+        std::lock_guard lock(manifestBootstrapMutex_);
+        if (now < manifestBootstrapNext_)
+            return;
+        manifestBootstrapNext_ = now + manifestBootstrapInterval;
+
+        // The validators whose manifests matter: the trusted ones once the
+        // trusted set has been worked out, every listed one before that.
+        auto keys = app_.validators().getTrustedMasterKeys();
+        bool const trusted = !keys.empty();
+        if (!trusted)
+            app_.validators().for_each_listed(
+                [&keys](PublicKey const& pk, bool) { keys.insert(pk); });
+        if (keys.empty())
+            return;
+
+        // Enough of them to make a quorum.
+        std::size_t const needed =
+            manifestQuorum(keys.size(), trusted, app_.validators().quorum());
+
+        auto const& manifests = app_.validatorManifests();
+        std::size_t resolved = 0;
+        for (auto const& pk : keys)
+            if (manifests.getManifest(pk))
+                ++resolved;
+
+        if (resolved >= needed)
+            return;
+
+        std::vector<uint256> reported;
+        for (auto const& peer : app_.overlay().getActivePeers())
+            reported.push_back(peer->getClosedLedgerHash());
+
+        if (manifestBootstrapTried_.size() > manifestBootstrapMemory)
+            manifestBootstrapTried_.clear();
+
+        picked = pickManifestCandidates(
+            reported, manifestBootstrapTried_, manifestBootstrapWidth);
+        if (picked.empty())
+            return;
+
+        manifestBootstrapTried_.insert(picked.begin(), picked.end());
+
+        JLOG(m_journal.info())
+            << "Manifests held for " << resolved << " of " << keys.size()
+            << " validators, " << needed << " needed: reading manifests from "
+            << picked.size() << " ledger(s) reported by " << reported.size()
+            << " peer(s)";
+    }
+
+    // Each is acquired as consensus would acquire it. Before a ledger has
+    // been validated, InboundLedger reads the manifests first, by key and from
+    // the directory, and only then fetches the rest. The first pick is
+    // usually the ledger checkLastClosedLedger() is already acquiring. Ledgers
+    // of the same network share nearly all their nodes, so each further one
+    // costs little more than what changed; one that only a peer has fails and
+    // costs nothing more.
+    //
+    // Runs on the heartbeat, ahead of re-arming it, so nothing here may throw.
+    for (auto const& hash : picked)
+    {
+        JLOG(m_journal.debug()) << "Reading manifests from ledger " << hash;
+        try
+        {
+            app_.getInboundLedgers().acquire(
+                hash, 0, InboundLedger::Reason::CONSENSUS);
+        }
+        catch (std::exception const& e)
+        {
+            JLOG(m_journal.warn()) << "Could not start reading manifests from "
+                                   << "ledger " << hash << ": " << e.what();
+        }
+    }
 }
 
 void
@@ -1196,6 +1401,19 @@ NetworkOPsImp::processTransaction(
     // NOTE eahennis - I think this check is redundant,
     // but I'm not 100% sure yet.
     // If so, only cost is looking up HashRouter flags.
+    // Before checkValidity(), which verifies the manifest: a fee miss is local
+    // and must not mark the transaction bad.
+    if (auto const [fee, feeReason] =
+            checkManifestIngressFee(app_, *transaction->getSTransaction());
+        fee == ManifestIngressFee::Refused)
+    {
+        JLOG(m_journal.debug())
+            << "Manifest-authorized tx dropped: " << feeReason;
+        transaction->setStatus(INVALID);
+        transaction->setResult(telMANIFEST_FEE_MISMATCH);
+        return;
+    }
+
     auto const [validity, reason] = checkValidity(
         app_.getHashRouter(),
         *transaction->getSTransaction(),
@@ -1507,6 +1725,12 @@ NetworkOPsImp::apply(std::unique_lock<std::mutex>& batchLock)
                     tx.set_deferred(e.result == terQUEUED);
                     // FIXME: This should be when we received it
                     app_.overlay().relay(e.transaction->getID(), tx, *toSkip);
+
+                    // Also fan it out over the UDP Superhighway, if enabled.
+                    // shouldRelay() above ensures we do this at most once.
+                    app_.overlay().publishTxXUSH(
+                        s.slice(), e.transaction->getID());
+
                     e.transaction->setBroadcast();
                 }
             }
@@ -1629,11 +1853,68 @@ NetworkOPsImp::isAmendmentBlocked()
     return amendmentBlocked_;
 }
 
+// Render the unsupported amendments for the operator-facing receipt. This is
+// the only identification available: an amendment this build does not support
+// has no name here, so the id is what the operator matches against the
+// release notes.
+static std::vector<std::string>
+describeUnsupportedAmendments(AmendmentTable const& table)
+{
+    std::vector<std::string> lines;
+
+    for (auto const& amendment : table.unsupportedAmendments())
+    {
+        std::ostringstream ss;
+        ss << to_string(amendment.id);
+        if (amendment.expected)
+            ss << "  (expected to activate "
+               << to_string_iso(*amendment.expected) << ")";
+        else
+            ss << "  (already active)";
+        lines.push_back(ss.str());
+    }
+
+    return lines;
+}
+
 void
 NetworkOPsImp::setAmendmentBlocked()
 {
-    amendmentBlocked_ = true;
+    // Idempotent: this is reached from Change::applyAmendment (i.e. from the
+    // transaction application path, which is not guarded by isBlocked()) as
+    // well as from LedgerMaster::setValidLedger. Writing the receipt and
+    // logging once per process is enough, and it keeps the synchronous file
+    // write out of any subsequent ledger apply.
+    if (amendmentBlocked_.exchange(true))
+        return;
+
     setMode(OperatingMode::CONNECTED);
+    if (!app_.config().standalone())
+    {
+        auto const blockedFile = amendmentBlockedFilePath(app_.config());
+        if (auto const ec = writeAmendmentBlockedFile(
+                app_.config(),
+                describeUnsupportedAmendments(app_.getAmendmentTable())))
+        {
+            JLOG(m_journal.fatal())
+                << "Could not write amendment-blocked receipt " << blockedFile
+                << ": " << ec.message();
+        }
+        else
+        {
+            JLOG(m_journal.fatal())
+                << "Amendment-blocked receipt written to " << blockedFile;
+        }
+        JLOG(m_journal.fatal())
+            << "This version of xahaud does not support a network amendment. "
+               "The amendment will activate soon or is already active. "
+               "The server will stop. Upgrade xahaud before you restart the "
+               "server.";
+        app_.signalStop(
+            "Unsupported network amendment. Upgrade xahaud before you restart "
+            "the server. Details: " +
+            blockedFile.string());
+    }
 }
 
 inline bool
@@ -1779,6 +2060,27 @@ NetworkOPsImp::checkLastClosedLedger(
     return true;
 }
 
+// True if `view` enables an amendment this binary does not implement. Reads
+// only the amendments ledger entry, so it is safe to call once transaction
+// deserialization is already known to be failing.
+static bool
+ledgerHasUnsupportedAmendments(
+    AmendmentTable const& table,
+    ReadView const& view)
+{
+    auto const sle = view.read(keylet::amendments());
+    if (!sle || !sle->isFieldPresent(sfAmendments))
+        return false;
+
+    for (auto const& amendment : sle->getFieldV256(sfAmendments))
+    {
+        if (!table.isSupported(amendment))
+            return true;
+    }
+
+    return false;
+}
+
 void
 NetworkOPsImp::switchLastClosedLedger(
     std::shared_ptr<Ledger const> const& newLCL)
@@ -1789,8 +2091,32 @@ NetworkOPsImp::switchLastClosedLedger(
 
     clearNeedNetworkLedger();
 
-    // Update fee computations.
-    app_.getTxQ().processClosedLedger(app_, *newLCL, true);
+    // Update fee computations. May throw if the ledger contains
+    // transactions with fields unknown to this binary (e.g. after an
+    // unsupported amendment activates). Catch to allow graceful shutdown.
+    try
+    {
+        app_.getTxQ().processClosedLedger(app_, *newLCL, true);
+    }
+    catch (std::runtime_error const& e)
+    {
+        // Do not decide this on amendmentBlocked_ alone. A JUMP can happen
+        // before any validated ledger has been processed -- e.g. immediately
+        // after a restart, which is precisely the case that crashed -- so the
+        // flag may still be clear here. Ask the ledger itself instead.
+        // Anything else is a real bug and must propagate.
+        if (!amendmentBlocked_ &&
+            !ledgerHasUnsupportedAmendments(app_.getAmendmentTable(), *newLCL))
+            throw;
+
+        JLOG(m_journal.error()) << "Failed to process closed ledger "
+                                << newLCL->info().seq << ": " << e.what();
+
+        // No-op if we are already blocked; otherwise this starts the
+        // shutdown that should have been started before activation.
+        setAmendmentBlocked();
+        return;
+    }
 
     // Caller must own master lock
     {
@@ -1874,12 +2200,33 @@ NetworkOPsImp::beginConsensus(
 
     if (prevLedger->rules().enabled(featureNegativeUNL))
         app_.validators().setNegativeUNL(prevLedger->negativeUNL());
+    // Pull in any manifests published on-ledger before the trusted set is
+    // recomputed, so a validator that rotated its ephemeral key on-chain is
+    // resolved to the new signing key in this same round. Every master key the
+    // cache holds or pins is probed, not only the trusted ones: a revocation is
+    // published on-ledger by master key alone, and a master key whose ephemeral
+    // key the cache already resolves would otherwise never be looked up again.
+    if (prevLedger->rules().enabled(featureOnChainManifests))
+    {
+        app_.validatorManifests().applyLedger(*prevLedger);
+
+        // The reverse of applyLedger above. Manifests reach us by peer gossip
+        // and in published validator lists, both of which can arrive before
+        // the validator gets around to publishing on-chain, so the cache may
+        // hold something newer than the ledger does.
+        publishNewerManifests(*prevLedger);
+    }
+
     TrustChanges const changes = app_.validators().updateTrusted(
         app_.getValidations().getCurrentNodeIDs(),
         closingInfo.parentCloseTime,
         *this,
         app_.overlay(),
         app_.getHashRouter());
+
+    // Pin the trusted master keys: their manifests are retained in the list
+    // tier and offered to every new peer, whichever source delivered them.
+    app_.validatorManifests().pin(app_.validators().getTrustedMasterKeys());
 
     if (!changes.added.empty() || !changes.removed.empty())
     {
@@ -2125,7 +2472,10 @@ NetworkOPsImp::pubServer()
         else
             jvObj[jss::load_factor] = f.loadFactorServer;
 
-        mLastFeeSummary = f;
+        {
+            std::lock_guard fsl(mFeeSummaryMutex_);
+            mLastFeeSummary = f;
+        }
 
         for (auto i = mStreamMaps[sServer].begin();
              i != mStreamMaps[sServer].end();)
@@ -2449,7 +2799,7 @@ NetworkOPsImp::getServerInfo(bool human, bool admin, bool counters)
                 "may be incorrectly configured or some [validator_list_sites] "
                 "may be unreachable.";
         }
-        if (admin && isAmendmentWarned())
+        if (isAmendmentWarned())
         {
             Json::Value& w = warnings.append(Json::objectValue);
             w[jss::id] = warnRPC_UNSUPPORTED_MAJORITY;
@@ -3010,14 +3360,23 @@ NetworkOPsImp::reportFeeChange()
         app_.getTxQ().getMetrics(*app_.openLedger().current()),
         app_.getFeeTrack()};
 
-    // only schedule the job if something has changed
-    if (f != mLastFeeSummary)
-    {
-        m_job_queue.addJob(
-            jtCLIENT_FEE_CHANGE, "reportFeeChange->pubServer", [this]() {
-                pubServer();
-            });
-    }
+    // Guard mLastFeeSummary under mFeeSummaryMutex_ to prevent concurrent
+    // threads from simultaneously passing the check and queuing duplicate
+    // jtCLIENT_FEE_CHANGE jobs (data race fix).
+    // Also fixes the no-subscriber case where mLastFeeSummary was
+    // never updated by pubServer(), causing endless job queuing.
+    // mFeeSummaryMutex_ is used instead of mSubLock to avoid a
+    // lock-ordering hazard: reportFeeChange() is called with masterMutex
+    // held, and pubServer() holds mSubLock across the subscriber fan-out.
+    if (std::lock_guard sl(mFeeSummaryMutex_); f != mLastFeeSummary)
+        mLastFeeSummary = f;
+    else
+        return;
+
+    m_job_queue.addJob(
+        jtCLIENT_FEE_CHANGE, "reportFeeChange->pubServer", [this]() {
+            pubServer();
+        });
 }
 
 void
@@ -4067,10 +4426,26 @@ NetworkOPsImp::subServer(
     jvResult[jss::pubkey_node] =
         toBase58(TokenType::NodePublic, app_.nodeIdentity().first);
 
-    std::lock_guard sl(mSubLock);
-    return mStreamMaps[sServer]
-        .emplace(isrListener->getSeq(), isrListener)
-        .second;
+    bool added;
+    bool isFirstSubscriber = false;
+    {
+        std::lock_guard sl(mSubLock);
+        added = mStreamMaps[sServer]
+                    .emplace(isrListener->getSeq(), isrListener)
+                    .second;
+        isFirstSubscriber = added && mStreamMaps[sServer].size() == 1;
+    }
+    if (isFirstSubscriber)
+    {
+        // First subscriber on an otherwise-quiet node: reset mLastFeeSummary
+        // so the next reportFeeChange() tick publishes a full serverStatus
+        // with base_fee and load_factor_* fields. Skip if a PubFee job is
+        // already queued — it will publish to the new subscriber anyway,
+        // and resetting here would cause a duplicate notification.
+        std::lock_guard fsl(mFeeSummaryMutex_);
+        mLastFeeSummary = {};
+    }
+    return added;
 }
 
 // <-- bool: true=erased, false=was not there
@@ -4621,7 +4996,7 @@ make_NetworkOPs(
     JobQueue& job_queue,
     LedgerMaster& ledgerMaster,
     ValidatorKeys const& validatorKeys,
-    boost::asio::io_service& io_svc,
+    boost::asio::io_context& io_svc,
     beast::Journal journal,
     beast::insight::Collector::ptr const& collector)
 {

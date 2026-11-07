@@ -5104,11 +5104,39 @@ public:
 
         using namespace jtx;
 
-        // OfferCreate
-        for (bool const withXahauV1 : {true, false})
+        // OfferID is only valid when Hooks are enabled.
         {
-            auto const amend = withXahauV1 ? features : features - fixXahauV1;
-            Env env{*this, amend};
+            Env env{*this, features - featureHooks};
+            auto const gw = Account{"gateway"};
+            auto const alice = Account{"alice"};
+            auto const USD = gw["USD"];
+
+            env.fund(XRP(10000), gw, alice);
+            env.close();
+
+            env(trust(alice, USD(1000)));
+            env.close();
+
+            env(pay(gw, alice, USD(200)));
+            env.close();
+
+            uint256 const offerId{getOfferIndex(alice, env.seq(alice))};
+            env(offer(alice, XRP(50), USD(50)));
+            env.close();
+
+            uint256 const newOfferId{getOfferIndex(alice, env.seq(alice))};
+            env(offer(alice, XRP(50), USD(50)),
+                offer_id(offerId),
+                ter(temDISABLED));
+            env(offer_cancel(alice), offer_id(offerId), ter(temDISABLED));
+
+            BEAST_EXPECT(env.le(keylet::unchecked(offerId)));
+            BEAST_EXPECT(!env.le(keylet::unchecked(newOfferId)));
+        }
+
+        // OfferCreate
+        {
+            Env env{*this, features};
             auto const gw = Account{"gateway"};
             auto const alice = Account{"alice"};
             auto const USD = gw["USD"];
@@ -5192,10 +5220,8 @@ public:
         }
 
         // OfferCancel
-        for (bool const withXahauV1 : {true, false})
         {
-            auto const amend = withXahauV1 ? features : features - fixXahauV1;
-            Env env{*this, amend};
+            Env env{*this, features};
             auto const gw = Account{"gateway"};
             auto const alice = Account{"alice"};
             auto const USD = gw["USD"];
@@ -5227,24 +5253,10 @@ public:
                 env(offer(alice, XRP(50), USD(50)));
                 env.close();
 
-                if (withXahauV1)
-                {
-                    env(offer_cancel(alice),
-                        offer_id(offerId),
-                        ter(tesSUCCESS));
-                    env.close();
-                    auto const offerLE = env.le(keylet::unchecked(offerId));
-                    BEAST_EXPECT(!offerLE);
-                }
-                else
-                {
-                    env(offer_cancel(alice),
-                        offer_id(offerId),
-                        ter(temBAD_SEQUENCE));
-                    env.close();
-                    auto const offerLE = env.le(keylet::unchecked(offerId));
-                    BEAST_EXPECT(offerLE);
-                }
+                env(offer_cancel(alice), offer_id(offerId), ter(tesSUCCESS));
+                env.close();
+                auto const offerLE = env.le(keylet::unchecked(offerId));
+                BEAST_EXPECT(!offerLE);
             }
 
             // no offer id or offer sequence
@@ -5266,24 +5278,12 @@ public:
                 env(offer(alice, XRP(50), USD(50)));
                 env.close();
 
-                if (withXahauV1)
-                {
-                    env(offer_cancel(alice, offerSeqId),
-                        offer_id(offerId),
-                        ter(temBAD_SEQUENCE));
-                    env.close();
-                    auto const offerLE = env.le(keylet::unchecked(offerId));
-                    BEAST_EXPECT(offerLE);
-                }
-                else
-                {
-                    env(offer_cancel(alice, offerSeqId),
-                        offer_id(offerId),
-                        ter(tesSUCCESS));
-                    env.close();
-                    auto const offerLE = env.le(keylet::unchecked(offerId));
-                    BEAST_EXPECT(!offerLE);
-                }
+                env(offer_cancel(alice, offerSeqId),
+                    offer_id(offerId),
+                    ter(temBAD_SEQUENCE));
+                env.close();
+                auto const offerLE = env.le(keylet::unchecked(offerId));
+                BEAST_EXPECT(offerLE);
             }
 
             // both offer id and offer sequence 0
@@ -5512,6 +5512,71 @@ public:
     }
 
     void
+    testFixCancelOfferExploit(FeatureBitset features)
+    {
+        testcase("fixCancelOfferExploit");
+        using namespace jtx;
+        Account const alice("alice");
+        Account const bob("bob");
+        Account const charlie("charlie");
+        auto const USD = alice["USD"];
+        auto const bobUSD = bob["USD"];
+
+        Env env(*this, features);
+
+        env.fund(XRP(1000), alice, bob);
+        env.close();
+
+        // OfferCancel: not ltOffer, exist account(alice)
+        uint256 const nonOfferId{keylet::account(alice.id()).key};
+        env(offer_cancel(bob), offer_id(nonOfferId), ter(tecNO_PERMISSION));
+        BEAST_EXPECT(env.le(keylet::unchecked(nonOfferId)));
+
+        // OfferCreate: not ltOffer
+        env(offer(bob, XRP(100), bobUSD(100)),
+            offer_id(nonOfferId),
+            ter(tecNO_PERMISSION));
+        BEAST_EXPECT(env.le(keylet::unchecked(nonOfferId)));
+
+        // OfferCancel: not ltOffer, not exist account(charlie)
+        uint256 const nonExistId{keylet::account(charlie.id()).key};
+        env(offer_cancel(bob), offer_id(nonExistId), ter(tesSUCCESS));
+        BEAST_EXPECT(!env.le(keylet::unchecked(nonExistId)));
+
+        // OfferCreate: not ltOffer, not exist account(charlie)
+        env(offer(bob, XRP(100), bobUSD(100)),
+            offer_id(nonExistId),
+            ter(tesSUCCESS));
+        BEAST_EXPECT(!env.le(keylet::unchecked(nonExistId)));
+
+        // create alice offer
+        uint256 const aliceOfferId{getOfferIndex(alice, env.seq(alice))};
+        env(offer(alice, XRP(100), USD(100)));
+        env.close();
+
+        // OfferCancel: bob cannot cancel alice's offer
+        env(offer_cancel(bob), offer_id(aliceOfferId), ter(tecNO_PERMISSION));
+        BEAST_EXPECT(env.le(keylet::unchecked(aliceOfferId)));
+
+        // OfferCreates: bob cannot cancel alice's offer
+        env(offer(bob, XRP(100), bobUSD(100)),
+            offer_id(aliceOfferId),
+            ter(tecNO_PERMISSION));
+        BEAST_EXPECT(env.le(keylet::unchecked(aliceOfferId)));
+
+        // An expired OfferCreate still cannot cancel another account's Offer.
+        uint256 const expiredBobOfferId{getOfferIndex(bob, env.seq(bob))};
+        env(offer(bob, XRP(100), bobUSD(100)),
+            offer_id(aliceOfferId),
+            json(sfExpiration.fieldName, lastClose(env)),
+            ter(tecNO_PERMISSION));
+        BEAST_EXPECT(env.le(keylet::unchecked(aliceOfferId)));
+        BEAST_EXPECT(!env.le(keylet::unchecked(expiredBobOfferId)));
+
+        env(offer_cancel(alice), offer_id(aliceOfferId), ter(tesSUCCESS));
+    }
+
+    void
     testAll(FeatureBitset features)
     {
         testCanceledOffer(features);
@@ -5574,6 +5639,7 @@ public:
         testRmSmallIncreasedQOffersIOU(features);
         testOfferID(features);
         testFillOrKill(features);
+        testFixCancelOfferExploit(features);
     }
 
     void

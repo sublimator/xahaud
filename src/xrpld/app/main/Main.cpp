@@ -34,16 +34,22 @@
 #include <xrpl/protocol/BuildInfo.h>
 #include <xrpl/resource/Fees.h>
 
+#include <boost/asio/io_context.hpp>
+#include <boost/process/v1/args.hpp>
+#include <boost/process/v1/child.hpp>
+#include <boost/process/v1/exe.hpp>
+
 #ifdef ENABLE_TESTS
 #include <test/unit_test/multi_runner.h>
 #include <xrpl/beast/unit_test/match.h>
 #endif  // ENABLE_TESTS
+#include <boost/algorithm/string.hpp>
+#include <boost/program_options.hpp>
 
 #include <google/protobuf/stubs/common.h>
 
 #include <boost/filesystem.hpp>
 #include <boost/predef.h>
-#include <boost/process.hpp>
 #include <boost/program_options.hpp>
 
 #include <cstdlib>
@@ -153,6 +159,7 @@ printHelp(const po::options_description& desc)
            "     gateway_balances [<ledger>] <issuer_account> [ <hotwallet> [ "
            "<hotwallet> ]]\n"
            "     get_counts\n"
+           "     hook_validate <hex>\n"
            "     json <method> <json>\n"
            "     ledger [<id>|current|closed|validated] [full]\n"
            "     ledger_accept\n"
@@ -291,7 +298,7 @@ runUnitTests(
     if (!child)
     {
         multi_runner_parent parent_runner;
-        std::vector<boost::process::child> children;
+        std::vector<boost::process::v1::child> children;
 
         std::string const exe_name = argv[0];
         std::vector<std::string> args;
@@ -304,7 +311,8 @@ runUnitTests(
 
         for (std::size_t i = 0; i < num_jobs; ++i)
             children.emplace_back(
-                boost::process::exe = exe_name, boost::process::args = args);
+                boost::process::v1::exe = exe_name,
+                boost::process::v1::args = args);
 
         int bad_child_exits = 0;
         int terminated_child_exits = 0;
@@ -809,6 +817,31 @@ run(int argc, char** argv)
     // No arguments. Run server.
     if (!vm.count("parameters"))
     {
+        // Clear any receipt left by a previous amendment-blocked shutdown. It
+        // records why the server stopped; it is not a lock. If this build
+        // still does not support the amendment it will stop again and write a
+        // fresh one, so there is nothing for the operator to delete by hand
+        // and no way for a stale receipt to keep a working build down.
+        // Standalone does not write receipts, so it does not clear them
+        // either, leaving the file readable for diagnosis.
+        if (!config->standalone())
+        {
+            boost::system::error_code ec;
+            auto const blockedFile = amendmentBlockedFilePath(*config);
+            if (removeAmendmentBlockedFile(*config, ec))
+            {
+                JLOG(logs->journal("Application").warn())
+                    << "Removed amendment-blocked receipt " << blockedFile
+                    << " left by a previous run.";
+            }
+            else if (ec)
+            {
+                JLOG(logs->journal("Application").warn())
+                    << "Could not remove amendment-blocked receipt "
+                    << blockedFile << ": " << ec.message();
+            }
+        }
+
         // TODO: this comment can be removed in a future release -
         // say 1.7 or higher
         if (config->had_trailing_comments())

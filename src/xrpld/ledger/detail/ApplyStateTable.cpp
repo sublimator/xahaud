@@ -131,8 +131,6 @@ ApplyStateTable::generateTxMeta(
     if (!hookEmission.empty())
         meta.setHookEmissions(STArray{hookEmission, sfHookEmissions});
 
-    bool const recordDefaultAmounts = to.rules().enabled(fixXahauV1);
-
     Mods newMod;
     for (auto& item : items_)
     {
@@ -159,6 +157,12 @@ ApplyStateTable::generateTxMeta(
         std::uint16_t nodeType = curNode
             ? curNode->getFieldU16(sfLedgerEntryType)
             : origNode->getFieldU16(sfLedgerEntryType);
+
+        // featureRNG: the RNG object is never in provisional metadata, which
+        // weak Hooks can read through meta_slot.
+        if (isProvisional && nodeType == ltRANDOM)
+            continue;
+
         meta.setAffectedNode(item.first, *type, nodeType);
         if (type == &sfDeletedNode)
         {
@@ -245,8 +249,7 @@ ApplyStateTable::generateTxMeta(
             for (auto const& obj : *curNode)
             {
                 bool const shouldRecord =
-                    (obj.getSType() == STI_AMOUNT && recordDefaultAmounts) ||
-                    !obj.isDefault();
+                    (obj.getSType() == STI_AMOUNT) || !obj.isDefault();
 
                 // save non-default values
                 if (shouldRecord &&
@@ -305,6 +308,7 @@ ApplyStateTable::apply(
     std::optional<STAmount> const& deliver,
     std::vector<STObject> const& hookExecution,
     std::vector<STObject> const& hookEmission,
+    std::optional<uint256> const& randomData,
     bool isDryRun,
     beast::Journal j)
 {
@@ -318,6 +322,11 @@ ApplyStateTable::apply(
         // generate meta
         auto [meta, newMod] =
             generateTxMeta(to, tx, deliver, hookExecution, hookEmission, j);
+
+        // featureRNG: added only here, never to provisional metadata, so a
+        // weak Hook reading meta_slot cannot learn the RNG state.
+        if (randomData)
+            meta.setRandomData(*randomData);
 
         if (!isDryRun)
         {

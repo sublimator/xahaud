@@ -25,6 +25,7 @@
 #include <xrpl/basics/contract.h>
 #include <xrpl/beast/core/LexicalCast.h>
 #include <boost/asio.hpp>
+#include <boost/asio/ip/resolver_query_base.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/regex.hpp>
@@ -51,16 +52,16 @@ class HTTPClientImp : public std::enable_shared_from_this<HTTPClientImp>,
 {
 public:
     HTTPClientImp(
-        boost::asio::io_service& io_service,
-        const unsigned short port,
+        boost::asio::io_context& io_context,
+        unsigned short const port,
         std::size_t maxResponseSize,
         beast::Journal& j)
-        : mSocket(io_service, httpClientSSLContext->context())
-        , mResolver(io_service)
+        : mSocket(io_context, httpClientSSLContext->context())
+        , mResolver(io_context)
         , mHeader(maxClientHeaderBytes)
         , mPort(port)
         , maxResponseSize_(maxResponseSize)
-        , mDeadline(io_service)
+        , mDeadline(io_context)
         , j_(j)
     {
     }
@@ -122,12 +123,20 @@ public:
         mComplete = complete;
         mTimeout = timeout;
 
+        // Bind a non-owning `this` (not shared_from_this()) into mBuild.
+        // mBuild is a member, so capturing a shared_ptr to self here would
+        // form a reference cycle (this -> mBuild -> shared_ptr<this>) that
+        // never breaks, leaking the object and its socket FD after the
+        // request completes. mBuild is only ever invoked from
+        // handleRequest(), which always runs inside an async handler that
+        // already holds a shared_from_this(), so the object is guaranteed
+        // alive whenever mBuild fires — a raw `this` is safe.
         request(
             bSSL,
             deqSites,
             std::bind(
                 &HTTPClientImp::makeGet,
-                shared_from_this(),
+                this,
                 strPath,
                 std::placeholders::_1,
                 std::placeholders::_2),
@@ -142,16 +151,32 @@ public:
     {
         JLOG(j_.trace()) << "Fetch: " << mDeqSites[0];
 
-        auto query = std::make_shared<boost::asio::ip::tcp::resolver::query>(
+        // Query is an aggregate: brace-initialise it rather than relying on
+        // C++20 parenthesised aggregate init, which clang < 16 rejects.
+        auto query = std::make_shared<Query>(Query{
             mDeqSites[0],
             std::to_string(mPort),
-            boost::asio::ip::resolver_query_base::numeric_service);
+            boost::asio::ip::resolver_query_base::numeric_service});
         mQuery = query;
 
-        mDeadline.expires_from_now(mTimeout, mShutdown);
+        // The old expires_from_now(timeout, ec) overload cleared this on
+        // success. Reset it explicitly so a failed host does not prevent
+        // the next host's deadline and resolver from being started.
+        mShutdown.clear();
+        try
+        {
+            mDeadline.expires_after(mTimeout);
+        }
+        catch (boost::system::system_error const& e)
+        {
+            mShutdown = e.code();
+            JLOG(j_.trace()) << "expires_after: " << mShutdown.message();
+        }
 
-        JLOG(j_.trace()) << "expires_from_now: " << mShutdown.message();
-
+        // The wait must be registered on the success path: XRPLF #5570 put it
+        // inside the catch above, so the deadline was never armed and a request
+        // to a server that never answers hung forever (ripple.net.HTTPClient
+        // "Socket cleanup after timeout"). This restores the pre-1.88 logic.
         if (!mShutdown)
         {
             mDeadline.async_wait(std::bind(
@@ -165,7 +190,9 @@ public:
             JLOG(j_.trace()) << "Resolving: " << mDeqSites[0];
 
             mResolver.async_resolve(
-                *mQuery,
+                mQuery->host,
+                mQuery->port,
+                mQuery->flags,
                 std::bind(
                     &HTTPClientImp::handleResolve,
                     shared_from_this(),
@@ -199,37 +226,29 @@ public:
         {
             JLOG(j_.trace()) << "Deadline arrived.";
 
-            // Mark us as shutting down.
-            // XXX Use our own error code.
-            mShutdown = boost::system::error_code{
-                boost::system::errc::bad_address,
-                boost::system::system_category()};
+            mShutdown = boost::asio::error::timed_out;
 
             // Cancel any resolving.
             mResolver.cancel();
 
-            // Stop the transaction.
-            mSocket.async_shutdown(std::bind(
-                &HTTPClientImp::handleShutdown,
-                shared_from_this(),
-                std::placeholders::_1));
-        }
-    }
-
-    void
-    handleShutdown(const boost::system::error_code& ecResult)
-    {
-        if (ecResult)
-        {
-            JLOG(j_.trace()) << "Shutdown error: " << mDeqSites[0] << ": "
-                             << ecResult.message();
+            // A deadline must interrupt the pending I/O. Graceful TLS
+            // shutdown can wait indefinitely for a silent peer, including
+            // while a handshake or response read is still outstanding.
+            // Closing the transport lets that operation complete with the
+            // timeout above through its normal completion handler.
+            boost::system::error_code ec;
+            mSocket.lowest_layer().close(ec);
+            if (ec)
+            {
+                JLOG(j_.trace()) << "Deadline close error: " << ec.message();
+            }
         }
     }
 
     void
     handleResolve(
-        const boost::system::error_code& ecResult,
-        boost::asio::ip::tcp::resolver::iterator itrEndpoint)
+        boost::system::error_code const& ecResult,
+        boost::asio::ip::tcp::resolver::results_type result)
     {
         if (!mShutdown)
         {
@@ -251,7 +270,7 @@ public:
 
             boost::asio::async_connect(
                 mSocket.lowest_layer(),
-                itrEndpoint,
+                result,
                 std::bind(
                     &HTTPClientImp::handleConnect,
                     shared_from_this(),
@@ -365,6 +384,11 @@ public:
         const boost::system::error_code& ecResult,
         std::size_t bytes_transferred)
     {
+        // Preserve the deadline error instead of parsing a partial header
+        // from the canceled read and reporting a malformed response.
+        if (mShutdown)
+            return invokeComplete(mShutdown);
+
         std::string strHeader{
             {std::istreambuf_iterator<char>(&mHeader)},
             std::istreambuf_iterator<char>()};
@@ -393,8 +417,12 @@ public:
         if (boost::regex_match(strHeader, smMatch, reBody))  // we got some body
             mBody = smMatch[1];
 
+        bool const hasContentLength =
+            boost::regex_match(strHeader, smMatch, reSize);
+        mReceivedContentLength = hasContentLength;
+
         std::size_t const responseSize = [&] {
-            if (boost::regex_match(strHeader, smMatch, reSize))
+            if (hasContentLength)
                 return beast::lexicalCast<std::size_t>(
                     std::string(smMatch[1]), maxResponseSize_);
             return maxResponseSize_;
@@ -445,22 +473,24 @@ public:
             JLOG(j_.trace()) << "Read error: " << mShutdown.message();
 
             invokeComplete(mShutdown);
+            return;
         }
-        else
-        {
-            if (mShutdown)
-            {
-                JLOG(j_.trace()) << "Complete.";
-            }
-            else
-            {
-                mResponse.commit(bytes_transferred);
-                std::string strBody{
-                    {std::istreambuf_iterator<char>(&mResponse)},
-                    std::istreambuf_iterator<char>()};
-                invokeComplete(ecResult, mStatus, mBody + strBody);
-            }
-        }
+
+        // Either the read completed normally or it ended at EOF. EOF is a
+        // successful completion for EOF-delimited responses, but it is an
+        // error when the server promised a Content-Length and closed early.
+        JLOG(j_.trace()) << "Complete.";
+
+        mResponse.commit(bytes_transferred);
+        std::string strBody{
+            {std::istreambuf_iterator<char>(&mResponse)},
+            std::istreambuf_iterator<char>()};
+
+        auto completeEc = ecResult;
+        if (completeEc == boost::asio::error::eof && !mReceivedContentLength)
+            completeEc.clear();
+
+        invokeComplete(completeEc, mStatus, mBody + strBody);
     }
 
     // Call cancel the deadline timer and invoke the completion routine.
@@ -471,13 +501,15 @@ public:
         std::string const& strData = "")
     {
         boost::system::error_code ecCancel;
-
-        (void)mDeadline.cancel(ecCancel);
-
-        if (ecCancel)
+        try
         {
-            JLOG(j_.trace()) << "invokeComplete: Deadline cancel error: "
-                             << ecCancel.message();
+            mDeadline.cancel();
+        }
+        catch (boost::system::system_error const& e)
+        {
+            JLOG(j_.trace())
+                << "invokeComplete: Deadline cancel error: " << e.what();
+            ecCancel = e.code();
         }
 
         JLOG(j_.debug()) << "invokeComplete: Deadline popping: "
@@ -511,11 +543,20 @@ private:
     bool mSSL;
     AutoSocket mSocket;
     boost::asio::ip::tcp::resolver mResolver;
-    std::shared_ptr<boost::asio::ip::tcp::resolver::query> mQuery;
+
+    struct Query
+    {
+        std::string host;
+        std::string port;
+        boost::asio::ip::resolver_query_base::flags flags;
+    };
+    std::shared_ptr<Query> mQuery;
+
     boost::asio::streambuf mRequest;
     boost::asio::streambuf mHeader;
     boost::asio::streambuf mResponse;
     std::string mBody;
+    bool mReceivedContentLength = false;
     const unsigned short mPort;
     std::size_t const maxResponseSize_;
     int mStatus;
@@ -542,7 +583,7 @@ private:
 void
 HTTPClient::get(
     bool bSSL,
-    boost::asio::io_service& io_service,
+    boost::asio::io_context& io_context,
     std::deque<std::string> deqSites,
     const unsigned short port,
     std::string const& strPath,
@@ -555,14 +596,14 @@ HTTPClient::get(
     beast::Journal& j)
 {
     auto client =
-        std::make_shared<HTTPClientImp>(io_service, port, responseMax, j);
+        std::make_shared<HTTPClientImp>(io_context, port, responseMax, j);
     client->get(bSSL, deqSites, strPath, timeout, complete);
 }
 
 void
 HTTPClient::get(
     bool bSSL,
-    boost::asio::io_service& io_service,
+    boost::asio::io_context& io_context,
     std::string strSite,
     const unsigned short port,
     std::string const& strPath,
@@ -577,14 +618,14 @@ HTTPClient::get(
     std::deque<std::string> deqSites(1, strSite);
 
     auto client =
-        std::make_shared<HTTPClientImp>(io_service, port, responseMax, j);
+        std::make_shared<HTTPClientImp>(io_context, port, responseMax, j);
     client->get(bSSL, deqSites, strPath, timeout, complete);
 }
 
 void
 HTTPClient::request(
     bool bSSL,
-    boost::asio::io_service& io_service,
+    boost::asio::io_context& io_context,
     std::string strSite,
     const unsigned short port,
     std::function<void(boost::asio::streambuf& sb, std::string const& strHost)>
@@ -600,7 +641,7 @@ HTTPClient::request(
     std::deque<std::string> deqSites(1, strSite);
 
     auto client =
-        std::make_shared<HTTPClientImp>(io_service, port, responseMax, j);
+        std::make_shared<HTTPClientImp>(io_context, port, responseMax, j);
     client->request(bSSL, deqSites, setRequest, timeout, complete);
 }
 
