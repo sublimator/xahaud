@@ -440,8 +440,7 @@ getImportWhitelist(Rules const& rules)
 #include "hook_api.macro"
 
     // Coverage callback: void __on_source_line(uint32_t line, uint32_t col)
-    // wasm codes spelled out: since the 2026.10 release the macro above maps
-    // types with detail::wasmSignature, so no void_t/uint32_t defines exist here
+    // Wasm codes spelled out: detail::wasmSignature replaced the type defines.
     whitelist["__on_source_line"] = {0x00U, 0x7FU, 0x7FU};
 
 #undef HOOK_API_DEFINITION
